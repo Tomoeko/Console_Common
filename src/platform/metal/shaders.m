@@ -1,4 +1,5 @@
 #import "shaders.h"
+#include "console_common/platform/platform.h"
 #import <Foundation/Foundation.h>
 
 /* Source is compiled once at startup. The C renderer supplies ordered quads;
@@ -6,7 +7,8 @@
 NSString *cc_metal_shader_source(void) {
     return [NSString
         stringWithFormat:
-            @"%@%@%@%@",
+            @"#define CC_WIDTH %d.0\n#define CC_HEIGHT %d.0\n%@%@%@%@",
+            CC_FRAME_WIDTH, CC_FRAME_HEIGHT,
             @"#include <metal_stdlib>\n"
              "using namespace metal;\n"
              "\n"
@@ -41,8 +43,8 @@ NSString *cc_metal_shader_source(void) {
              "                                uint index [[vertex_id]]) {\n"
              "    CcVertexOutput output;\n"
              "    CcVertex input = vertices[index];\n"
-             "    output.position = float4(input.position.x * (2.0 / 640.0) - 1.0,\n"
-             "                             1.0 - input.position.y * (2.0 / 456.0),\n"
+             "    output.position = float4(input.position.x * (2.0 / CC_WIDTH) - 1.0,\n"
+             "                             1.0 - input.position.y * (2.0 / CC_HEIGHT),\n"
              "                             0.0, 1.0);\n"
              "    output.uv0 = input.uv[0];\n"
              "    output.uv1 = input.uv[1];\n"
