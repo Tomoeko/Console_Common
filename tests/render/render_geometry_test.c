@@ -36,8 +36,7 @@ static void test_quad_corners(void) {
 }
 
 static void test_signed_dimensions_and_uvs(void) {
-    /* Extent policy belongs to the caller. Preserve flipped geometry and
-     * image coordinates when producing corners for a drawable quad. */
+    /* Both backends preserve flipped geometry and image coordinates. */
     const CcQuad quad = {.x = 20.0f,
                          .y = 15.0f,
                          .width = -8.0f,
@@ -47,6 +46,7 @@ static void test_signed_dimensions_and_uvs(void) {
                          .u1 = 0.0f,
                          .v1 = 0.0f,
                          .color = {1.0f, 1.0f, 1.0f, 0.5f}};
+    assert(cc_render_quad_has_area(&quad));
     CcDrawVertex corners[CC_QUAD_CORNERS];
     cc_render_quad_corners(&quad, corners);
 
@@ -54,6 +54,19 @@ static void test_signed_dimensions_and_uvs(void) {
     assert_corner(corners[1], 12.0f, 15.0f, 0.0f, 1.0f, quad.color);
     assert_corner(corners[2], 20.0f, 10.0f, 1.0f, 0.0f, quad.color);
     assert_corner(corners[3], 12.0f, 10.0f, 0.0f, 0.0f, quad.color);
+}
+
+static void test_quad_area(void) {
+    CcQuad quad = {.width = 8, .height = 5};
+    assert(cc_render_quad_has_area(&quad));
+    quad.width = 0;
+    assert(!cc_render_quad_has_area(&quad));
+    quad.width = -8;
+    quad.height = 0;
+    assert(!cc_render_quad_has_area(&quad));
+    quad.height = -5;
+    assert(cc_render_quad_has_area(&quad));
+    assert(!cc_render_quad_has_area(NULL));
 }
 
 static float triangle_area(const CcDrawVertex corners[CC_QUAD_CORNERS],
@@ -125,6 +138,7 @@ static void test_material_depth_snapshot(void) {
 int main(void) {
     test_quad_corners();
     test_signed_dimensions_and_uvs();
+    test_quad_area();
     test_quad_triangulation();
     test_material_depth_snapshot();
     return 0;

@@ -117,6 +117,7 @@ typedef struct CcMaterialQuad {
     uint32_t textures[CC_MATERIAL_TEXTURES];
     uint8_t wrap_s[CC_MATERIAL_TEXTURES];
     uint8_t wrap_t[CC_MATERIAL_TEXTURES];
+    bool nearest[CC_MATERIAL_TEXTURES]; /* Zero keeps linear sampling. */
     unsigned texture_count;
     float registers[3][4];
     float konst_colors[4][4];
@@ -146,9 +147,9 @@ void cc_platform_draw_quad(CcPlatform *platform, const CcQuad *quad);
 void cc_platform_draw_vertices(CcPlatform *platform, const CcDrawVertex vertices[4],
                                uint32_t texture);
 void cc_platform_draw_material_quad(CcPlatform *platform, const CcMaterialQuad *quad);
-/* Prepare a material's shader while layouts load. Call after platform creation
- * on its rendering thread. GLES2 caches supported TEV programs (up to six
- * stages); Metal already has its shader ready and treats this as a no-op. */
+/* Prepare material resources while layouts load, on the rendering thread.
+ * GLES2 caches supported TEV programs (up to six stages); Metal prepares the
+ * material's blend pipeline using its previously compiled shader library. */
 void cc_platform_prepare_material(CcPlatform *platform, const CcMaterialQuad *quad);
 /* Apply the source scene fader after the scene's last draw, before presenting.
  * This is ignored for offscreen preview captures. */

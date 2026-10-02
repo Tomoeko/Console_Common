@@ -1,11 +1,13 @@
 #include "console_common/platform/platform.h"
 #include "console_common/render/viewport.h"
+#include "clip.h"
 #include "geometry.h"
 #include "host.h"
 #include "material_blend.h"
 #include "material_depth.h"
 #include "shaders.h"
 #include "retained_frame.h"
+#include "texture_dimensions.h"
 
 #include <GLES2/gl2.h>
 
@@ -65,6 +67,7 @@ struct CcPlatform {
     unsigned depth_key;
     bool rendering_target;
     CcGles2RetainedFrame retained;
+    CcGles2TextureDimensions texture_dimensions;
     GLint projection_location;
     GLint texture_location;
     GLint material_frame_location;
@@ -73,6 +76,7 @@ struct CcPlatform {
     GLint material_konst_location;
     GLint material_alpha_location;
     GLint material_wrap_locations[2];
+    GLint material_sampling_locations[2];
 
     CcVertex vertices[CC_BATCH_QUADS * CC_VERTICES_PER_QUAD];
     size_t quad_count;
@@ -106,7 +110,8 @@ static void cc_clear_depth(CcPlatform *platform) {
     glDepthMask(GL_FALSE);
 }
 
-static GLuint cc_upload_texture(int width, int height, const uint8_t *rgba) {
+static GLuint cc_upload_texture_storage(int width, int height, const uint8_t *rgba,
+                                        GLint filter) {
     GLuint texture = 0;
     glGenTextures(1, &texture);
     if (texture == 0) {
@@ -114,9 +119,9 @@ static GLuint cc_upload_texture(int width, int height, const uint8_t *rgba) {
     }
 
     glBindTexture(GL_TEXTURE_2D, texture);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    /* CLAMP_TO_EDGE and no mipmaps keep arbitrary Wii texture sizes valid on ES2. */
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
+    /* CLAMP_TO_EDGE and no mipmaps keep arbitrary texture sizes valid on ES2. */
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
@@ -127,6 +132,81 @@ static GLuint cc_upload_texture(int width, int height, const uint8_t *rgba) {
         return 0;
     }
     return texture;
+}
+
+static GLuint cc_upload_texture(CcPlatform *platform, int width, int height,
+                                const uint8_t *rgba) {
+    GLuint texture = cc_upload_texture_storage(width, height, rgba, GL_LINEAR);
+    if (!texture)
+        return 0;
+    /* Mediump cannot reliably represent every large texture's texel center.
+     * Such contexts keep a nearest mirror, doubling texture storage but avoiding
+     * per-draw allocations and allowing mixed filters on aliased handles. */
+    GLuint mirror = platform->fragment_highp
+                        ? 0
+                        : cc_upload_texture_storage(width, height, rgba, GL_NEAREST);
+    if ((!platform->fragment_highp && !mirror) ||
+        !cc_gles2_texture_dimensions_set(&platform->texture_dimensions,
+                                         (uint32_t)texture, width, height) ||
+        !cc_gles2_texture_dimensions_set_nearest(&platform->texture_dimensions,
+                                                 (uint32_t)texture, (uint32_t)mirror)) {
+        if (mirror)
+            glDeleteTextures(1, &mirror);
+        glDeleteTextures(1, &texture);
+        cc_gles2_texture_dimensions_remove(&platform->texture_dimensions,
+                                           (uint32_t)texture);
+        return 0;
+    }
+    return texture;
+}
+
+static void cc_delete_texture(CcPlatform *platform, GLuint texture) {
+    GLuint mirror = (GLuint)cc_gles2_texture_dimensions_nearest(
+        &platform->texture_dimensions, (uint32_t)texture);
+    if (mirror)
+        glDeleteTextures(1, &mirror);
+    cc_gles2_texture_dimensions_remove(&platform->texture_dimensions,
+                                       (uint32_t)texture);
+    glDeleteTextures(1, &texture);
+}
+
+static void cc_bind_material_texture(CcPlatform *platform, GLint location,
+                                     GLuint texture, bool nearest) {
+    int dimensions[2] = {1, 1};
+    (void)cc_gles2_texture_dimensions_get(&platform->texture_dimensions,
+                                          (uint32_t)texture, dimensions);
+    /* Capture rows follow GL's framebuffer origin. Orientation belongs to the
+     * texture slot, because a TEV stage can select a different UV coordinate. */
+    bool flip_v = texture == platform->render_texture;
+    if (nearest && !platform->fragment_highp) {
+        GLuint mirror = (GLuint)cc_gles2_texture_dimensions_nearest(
+            &platform->texture_dimensions, (uint32_t)texture);
+        if (mirror) {
+            texture = mirror;
+            /* Nearest capture mirrors are copied into logical row order. */
+            flip_v = false;
+        }
+    }
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glUniform4f(location, (float)dimensions[0], (float)dimensions[1],
+                nearest && platform->fragment_highp ? 1.0f : 0.0f,
+                flip_v ? 1.0f : 0.0f);
+}
+
+static void cc_refresh_render_texture_mirror(CcPlatform *platform) {
+    GLuint mirror = (GLuint)cc_gles2_texture_dimensions_nearest(
+        &platform->texture_dimensions, (uint32_t)platform->render_texture);
+    if (!mirror)
+        return;
+    /* The original FBO is still bound. Reverse its rows on the GPU so nearest
+     * sampling uses logical texel order, including exact texel boundaries.
+     * Row copies avoid mediump rounding in a textured flip draw. This fallback
+     * submits one copy per row only when completing a lowp capture. */
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, mirror);
+    for (int row = 0; row < CC_FRAME_HEIGHT; ++row)
+        glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, row, 0, CC_FRAME_HEIGHT - 1 - row,
+                            CC_FRAME_WIDTH, 1);
 }
 
 static void cc_flush(CcPlatform *platform) {
@@ -197,6 +277,10 @@ static bool cc_initialize_graphics(CcPlatform *platform) {
         glGetUniformLocation(platform->material_program, "u_wrap0");
     platform->material_wrap_locations[1] =
         glGetUniformLocation(platform->material_program, "u_wrap1");
+    platform->material_sampling_locations[0] =
+        glGetUniformLocation(platform->material_program, "u_sampling0");
+    platform->material_sampling_locations[1] =
+        glGetUniformLocation(platform->material_program, "u_sampling1");
     glUniform1i(glGetUniformLocation(platform->material_program, "u_texture0"), 0);
     glUniform1i(glGetUniformLocation(platform->material_program, "u_texture1"), 1);
     glUniform2f(platform->material_frame_location, (float)CC_FRAME_WIDTH,
@@ -235,7 +319,7 @@ static bool cc_initialize_graphics(CcPlatform *platform) {
                           (const void *)offsetof(CcVertex, r));
 
     static const uint8_t white_pixel[4] = {255, 255, 255, 255};
-    platform->white_texture = cc_upload_texture(1, 1, white_pixel);
+    platform->white_texture = cc_upload_texture(platform, 1, 1, white_pixel);
     if (platform->white_texture == 0) {
         fprintf(stderr, "GLES2: could not allocate the white texture.\n");
         return false;
@@ -286,7 +370,7 @@ void cc_platform_destroy(CcPlatform *platform) {
 
     if (cc_gles2_host_make_current(platform->host)) {
         if (platform->white_texture != 0) {
-            glDeleteTextures(1, &platform->white_texture);
+            cc_delete_texture(platform, platform->white_texture);
         }
         if (platform->render_framebuffer != 0) {
             glDeleteFramebuffers(1, &platform->render_framebuffer);
@@ -295,7 +379,7 @@ void cc_platform_destroy(CcPlatform *platform) {
             glDeleteRenderbuffers(1, &platform->render_depth);
         }
         if (platform->render_texture != 0) {
-            glDeleteTextures(1, &platform->render_texture);
+            cc_delete_texture(platform, platform->render_texture);
         }
         if (platform->vertex_buffer != 0) {
             glDeleteBuffers(1, &platform->vertex_buffer);
@@ -313,6 +397,12 @@ void cc_platform_destroy(CcPlatform *platform) {
         if (platform->tev_vertex_shader) {
             glDeleteShader(platform->tev_vertex_shader);
         }
+        for (size_t index = 0; index < platform->texture_dimensions.count; ++index) {
+            GLuint mirror =
+                (GLuint)platform->texture_dimensions.entries[index].nearest_handle;
+            if (mirror)
+                glDeleteTextures(1, &mirror);
+        }
     }
     cc_gles2_host_destroy(platform->host);
     cc_gles2_retained_destroy(&platform->retained);
@@ -321,6 +411,7 @@ void cc_platform_destroy(CcPlatform *platform) {
         free(platform->tev_programs);
         platform->tev_programs = next;
     }
+    cc_gles2_texture_dimensions_destroy(&platform->texture_dimensions);
     free(platform);
 }
 
@@ -384,15 +475,6 @@ void cc_platform_begin(CcPlatform *platform, CcColor clear_color) {
     platform->scissor_enabled = false;
 }
 
-static int cc_clamp_clip_edge(float coordinate, float scale, int limit, bool upper) {
-    float value = coordinate * scale;
-    if (!isfinite(value) || value <= 0.0f)
-        return 0;
-    if (value >= (float)limit)
-        return limit;
-    return (int)(upper ? ceilf(value) : floorf(value));
-}
-
 void cc_platform_set_clip(CcPlatform *platform, const CcClipRect *rect) {
     if (!platform)
         return;
@@ -412,20 +494,12 @@ void cc_platform_set_clip(CcPlatform *platform, const CcClipRect *rect) {
         platform->scissor_enabled = false;
         return;
     }
-    CcClipRect full = {0, 0, CC_FRAME_WIDTH, CC_FRAME_HEIGHT};
-    if (!rect)
-        rect = &full;
     CcViewport content = platform->presentation;
-    float scale_x = (float)content.width / CC_FRAME_WIDTH;
-    float scale_y = (float)content.height / CC_FRAME_HEIGHT;
-    int x0 = cc_clamp_clip_edge(rect->x, scale_x, content.width, false);
-    int x1 = cc_clamp_clip_edge(rect->x + rect->width, scale_x, content.width, true);
-    int y0 = cc_clamp_clip_edge(rect->y, scale_y, content.height, false);
-    int y1 = cc_clamp_clip_edge(rect->y + rect->height, scale_y, content.height, true);
-    if (x1 < x0)
-        x1 = x0;
-    if (y1 < y0)
-        y1 = y0;
+    CcViewport clip = cc_render_clip_pixels(rect, content.width, content.height);
+    int x0 = clip.x;
+    int x1 = clip.x + clip.width;
+    int y0 = clip.y;
+    int y1 = clip.y + clip.height;
     if (region_active) {
         CcViewport region = retained->region;
         if (x0 < region.x)
@@ -465,8 +539,7 @@ static CcVertex cc_vertex(float x, float y, float u, float v, CcColor color) {
 }
 
 void cc_platform_draw_quad(CcPlatform *platform, const CcQuad *quad) {
-    if (platform == NULL || quad == NULL || quad->width == 0.0f ||
-        quad->height == 0.0f) {
+    if (platform == NULL || !cc_render_quad_has_area(quad)) {
         return;
     }
 
@@ -511,46 +584,21 @@ void cc_platform_draw_vertices(CcPlatform *platform, const CcDrawVertex corners[
  * The material shader applies GX wrap coordinates before sampling textures
  * that remain CLAMP_TO_EDGE at the API level. */
 static bool cc_tev_supported(CcPlatform *platform, const CcMaterialQuad *quad) {
-    if (quad->tev_stage_count == 0)
-        return false;
-    if (quad->tev_stage_count > CC_ES2_TEV_STAGES) {
-        if (!platform->warned_tev_limit) {
-            fprintf(stderr, "GLES2: materials with over six TEV stages use the "
-                            "simple material fallback.\n");
-            platform->warned_tev_limit = true;
-        }
-        return false;
+    CcTevSupport support = cc_material_tev_support(quad, platform->fragment_highp);
+    if (support == CC_TEV_STAGE_LIMIT && !platform->warned_tev_limit) {
+        fprintf(stderr, "GLES2: materials with over six TEV stages use the "
+                        "simple material fallback.\n");
+        platform->warned_tev_limit = true;
+    } else if (support == CC_TEV_PRECISION_LIMIT && !platform->warned_tev_precision) {
+        fprintf(stderr, "GLES2: 24-bit TEV comparisons require "
+                        "fragment highp; using the simple fallback.\n");
+        platform->warned_tev_precision = true;
+    } else if (support == CC_TEV_INVALID_ENCODING && !platform->warned_tev_encoding) {
+        fprintf(stderr, "GLES2: invalid TEV selector encoding uses the "
+                        "simple material fallback.\n");
+        platform->warned_tev_encoding = true;
     }
-    if (!platform->fragment_highp) {
-        for (unsigned stage = 0; stage < quad->tev_stage_count; ++stage) {
-            unsigned kind = quad->tev_stages[stage][6] & 15;
-            if (kind == 12 || kind == 13) {
-                if (!platform->warned_tev_precision) {
-                    fprintf(stderr, "GLES2: 24-bit TEV comparisons require "
-                                    "fragment highp; using the simple fallback.\n");
-                    platform->warned_tev_precision = true;
-                }
-                return false;
-            }
-        }
-    }
-    bool invalid = quad->has_alpha_compare &&
-                   ((quad->alpha_compare[0] & 15) > 7 ||
-                    (quad->alpha_compare[0] >> 4) > 7 || quad->alpha_compare[1] > 3);
-    for (unsigned stage = 0; stage < quad->tev_stage_count; ++stage) {
-        const uint8_t *bytes = quad->tev_stages[stage];
-        invalid = invalid || (bytes[8] & 15) > 7 || (bytes[8] >> 4) > 7 ||
-                  (bytes[9] & 15) > 7 || (bytes[9] >> 4) > 7;
-    }
-    if (invalid) {
-        if (!platform->warned_tev_encoding) {
-            fprintf(stderr, "GLES2: invalid TEV selector encoding uses the "
-                            "simple material fallback.\n");
-            platform->warned_tev_encoding = true;
-        }
-        return false;
-    }
-    return true;
+    return support == CC_TEV_SUPPORTED;
 }
 
 void cc_platform_prepare_material(CcPlatform *platform, const CcMaterialQuad *quad) {
@@ -597,9 +645,10 @@ void cc_platform_draw_material_quad(CcPlatform *platform, const CcMaterialQuad *
         glUniform4fv(tev_program->konst_location, 4, &quad->konst_colors[0][0]);
         for (unsigned unit = 0; unit < CC_MATERIAL_TEXTURES; ++unit) {
             glActiveTexture((GLenum)(GL_TEXTURE0 + unit));
-            glBindTexture(GL_TEXTURE_2D, quad->textures[unit]
-                                             ? (GLuint)quad->textures[unit]
-                                             : platform->white_texture);
+            GLuint texture = quad->textures[unit] ? (GLuint)quad->textures[unit]
+                                                  : platform->white_texture;
+            cc_bind_material_texture(platform, tev_program->sampling_locations[unit],
+                                     texture, quad->nearest[unit]);
         }
     } else {
         glUseProgram(platform->material_program);
@@ -615,9 +664,11 @@ void cc_platform_draw_material_quad(CcPlatform *platform, const CcMaterialQuad *
                     (float)quad->alpha_compare[3]);
         for (unsigned unit = 0; unit < 2; ++unit) {
             glActiveTexture((GLenum)(GL_TEXTURE0 + unit));
-            glBindTexture(GL_TEXTURE_2D, quad->textures[unit]
-                                             ? (GLuint)quad->textures[unit]
-                                             : platform->white_texture);
+            GLuint texture = quad->textures[unit] ? (GLuint)quad->textures[unit]
+                                                  : platform->white_texture;
+            cc_bind_material_texture(platform,
+                                     platform->material_sampling_locations[unit],
+                                     texture, quad->nearest[unit]);
             glUniform2f(platform->material_wrap_locations[unit],
                         (float)quad->wrap_s[unit], (float)quad->wrap_t[unit]);
         }
@@ -706,6 +757,7 @@ void cc_platform_end(CcPlatform *platform) {
     }
     cc_flush(platform);
     if (platform->rendering_target) {
+        cc_refresh_render_texture_mirror(platform);
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         platform->rendering_target = false;
         return;
@@ -728,20 +780,20 @@ uint32_t cc_platform_create_render_texture(CcPlatform *platform) {
     if (CC_FRAME_WIDTH > limit || CC_FRAME_HEIGHT > limit)
         return 0;
 
-    GLuint texture = cc_upload_texture(CC_FRAME_WIDTH, CC_FRAME_HEIGHT, NULL);
+    GLuint texture = cc_upload_texture(platform, CC_FRAME_WIDTH, CC_FRAME_HEIGHT, NULL);
     if (!texture)
         return 0;
     GLuint framebuffer = 0;
     glGenFramebuffers(1, &framebuffer);
     if (!framebuffer) {
-        glDeleteTextures(1, &texture);
+        cc_delete_texture(platform, texture);
         return 0;
     }
     GLuint depth = 0;
     glGenRenderbuffers(1, &depth);
     if (!depth) {
         glDeleteFramebuffers(1, &framebuffer);
-        glDeleteTextures(1, &texture);
+        cc_delete_texture(platform, texture);
         return 0;
     }
     glBindRenderbuffer(GL_RENDERBUFFER, depth);
@@ -759,7 +811,7 @@ uint32_t cc_platform_create_render_texture(CcPlatform *platform) {
     if (status != GL_FRAMEBUFFER_COMPLETE) {
         glDeleteRenderbuffers(1, &depth);
         glDeleteFramebuffers(1, &framebuffer);
-        glDeleteTextures(1, &texture);
+        cc_delete_texture(platform, texture);
         return 0;
     }
     platform->render_texture = texture;
@@ -804,7 +856,7 @@ uint32_t cc_platform_create_texture(CcPlatform *platform, int width, int height,
     }
     cc_flush(platform);
     cc_frame_damage_invalidate(platform->retained.commands);
-    return (uint32_t)cc_upload_texture(width, height, rgba);
+    return (uint32_t)cc_upload_texture(platform, width, height, rgba);
 }
 
 void cc_platform_destroy_texture(CcPlatform *platform, uint32_t texture) {
@@ -826,5 +878,5 @@ void cc_platform_destroy_texture(CcPlatform *platform, uint32_t texture) {
         platform->render_depth = 0;
         platform->render_texture = 0;
     }
-    glDeleteTextures(1, &name);
+    cc_delete_texture(platform, name);
 }

@@ -6,6 +6,7 @@
 #import <QuartzCore/CAMetalLayer.h>
 
 #include "console_common/platform/platform.h"
+#include "material.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -15,6 +16,12 @@
 #endif
 
 #define CC_IN_FLIGHT_FRAMES 3
+
+enum {
+    CC_BLEND_DISABLED = 64,
+    CC_BLEND_DEFAULT = 4 * 8 + 5,
+    CC_MATERIAL_PIPELINE_VARIANTS = CC_BLEND_DISABLED + 1
+};
 
 typedef struct CcVertex {
     float x;
@@ -46,7 +53,7 @@ _Static_assert(sizeof(CcMaterialParams) == 16 * sizeof(float),
 typedef struct CcTevParams {
     float registers[3][4];
     float konst_colors[4][4];
-    uint32_t stage_words[6][4];
+    uint32_t stage_words[CC_RENDER_TEV_STAGES][4];
     uint32_t swap[4];
     uint32_t stage_count;
     uint32_t alpha_comparisons;
@@ -70,6 +77,7 @@ typedef struct CcBatchState {
     uint32_t textures[CC_MATERIAL_TEXTURES];
     uint8_t wrap_s[CC_MATERIAL_TEXTURES];
     uint8_t wrap_t[CC_MATERIAL_TEXTURES];
+    bool nearest[CC_MATERIAL_TEXTURES];
     uint8_t blend_key;
     uint8_t depth_key;
     union {
@@ -116,11 +124,12 @@ struct CcPlatform {
     id<MTLFunction> vertex_function;
     id<MTLFunction> material_fragment_function;
     id<MTLFunction> tev_fragment_function;
-    NSMutableDictionary<NSNumber *, id<MTLRenderPipelineState>> *material_pipelines;
+    id<MTLRenderPipelineState> material_pipelines[2][CC_MATERIAL_PIPELINE_VARIANTS];
+    bool material_pipeline_attempted[2][CC_MATERIAL_PIPELINE_VARIANTS];
     id<MTLDepthStencilState> depth_states[17];
     id<MTLTexture> window_depth[CC_IN_FLIGHT_FRAMES];
     id<MTLTexture> target_depth[CC_IN_FLIGHT_FRAMES];
-    id<MTLSamplerState> samplers[3][3];
+    id<MTLSamplerState> samplers[2][3][3];
     MTLRenderPassDescriptor *render_pass;
     NSMutableArray *textures;
     NSMutableArray<NSNumber *> *free_texture_handles;
@@ -146,6 +155,10 @@ struct CcPlatform {
 
 /* GPU initialization precedes window creation. The window adapter retains
  * CcMetalState through platform->metal_state until cc_platform_destroy. */
+bool cc_metal_prepare_pipelines(CcMetalState *state, id<MTLFunction> basic_fragment);
+id<MTLRenderPipelineState>
+cc_metal_material_pipeline(CcMetalState *state, CcBatchKind kind, uint8_t blend_key);
+
 bool cc_prepare_metal(CcMetalState *state);
 void cc_wait_for_metal(CcMetalState *state);
 void cc_release_metal(CcMetalState *state);

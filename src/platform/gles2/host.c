@@ -181,7 +181,7 @@ CcGles2Host *cc_gles2_host_create(const char *title, int width, int height) {
     }
 
     XStoreName(host->display, host->window, title != NULL ? title : "Wii Menu");
-    host->delete_window = XInternAtom(host->display, "CC_DELETE_WINDOW", False);
+    host->delete_window = XInternAtom(host->display, "WM_DELETE_WINDOW", False);
     XSetWMProtocols(host->display, host->window, &host->delete_window, 1);
 
     host->egl_surface = eglCreateWindowSurface(host->egl_display, config,

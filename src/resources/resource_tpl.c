@@ -1,4 +1,5 @@
 #include "console_common/resources/resource_tpl.h"
+#include "console_common/resources/gx_texture.h"
 #include "console_common/support/error.h"
 
 #include "resource_bytes.h"
@@ -12,66 +13,6 @@ enum {
      * combined RGBA output before allocating any decoded images. */
     CC_TPL_MAX_RGBA_BYTES = 256 * 1024 * 1024
 };
-
-typedef struct CcTplShape {
-    int width;
-    int height;
-    int bytes;
-} CcTplShape;
-
-static void cc_rgb565(uint16_t value, uint8_t color[4]) {
-    unsigned red = value >> 11;
-    unsigned green = (value >> 5) & 63u;
-    unsigned blue = value & 31u;
-    color[0] = (uint8_t)((red << 3) | (red >> 2));
-    color[1] = (uint8_t)((green << 2) | (green >> 4));
-    color[2] = (uint8_t)((blue << 3) | (blue >> 2));
-    color[3] = 255;
-}
-
-static void cc_rgb5a3(uint16_t value, uint8_t color[4]) {
-    if ((value & 0x8000u) != 0) {
-        unsigned red = (value >> 10) & 31u;
-        unsigned green = (value >> 5) & 31u;
-        unsigned blue = value & 31u;
-        color[0] = (uint8_t)((red << 3) | (red >> 2));
-        color[1] = (uint8_t)((green << 3) | (green >> 2));
-        color[2] = (uint8_t)((blue << 3) | (blue >> 2));
-        color[3] = 255;
-    } else {
-        unsigned alpha = (value >> 12) & 7u;
-        color[0] = (uint8_t)(((value >> 8) & 15u) * 17u);
-        color[1] = (uint8_t)(((value >> 4) & 15u) * 17u);
-        color[2] = (uint8_t)((value & 15u) * 17u);
-        color[3] = (uint8_t)((alpha << 5) | (alpha << 2) | (alpha >> 1));
-    }
-}
-
-static bool cc_shape(uint32_t format, CcTplShape *shape) {
-    switch (format) {
-        case 0:
-        case 8:
-        case 14:
-            *shape = (CcTplShape){8, 8, 32};
-            return true;
-        case 1:
-        case 2:
-        case 9:
-            *shape = (CcTplShape){8, 4, 32};
-            return true;
-        case 3:
-        case 4:
-        case 5:
-        case 10:
-            *shape = (CcTplShape){4, 4, 32};
-            return true;
-        case 6:
-            *shape = (CcTplShape){4, 4, 64};
-            return true;
-        default:
-            return false;
-    }
-}
 
 static bool cc_read_palette(const uint8_t *data, size_t size, size_t header_offset,
                             uint8_t **palette, size_t *palette_count, char *error,
@@ -102,103 +43,13 @@ static bool cc_read_palette(const uint8_t *data, size_t size, size_t header_offs
             color[2] = (uint8_t)value;
             color[3] = (uint8_t)(value >> 8);
         } else if (format == 1) {
-            cc_rgb565(value, color);
+            cc_gx_rgb565(value, CC_GX_COLOR_REPLICATE, color);
         } else {
-            cc_rgb5a3(value, color);
+            cc_gx_rgb5a3(value, CC_GX_COLOR_REPLICATE, color);
         }
     }
     *palette = colors;
     *palette_count = count;
-    return true;
-}
-
-static bool cc_decode_pixel(const uint8_t *tile, uint32_t format, int x, int y,
-                            int tile_width, const uint8_t *palette,
-                            size_t palette_count, uint8_t color[4]) {
-    int index = y * tile_width + x;
-    uint32_t value;
-    size_t palette_index = 0;
-
-    switch (format) {
-        case 0:
-        case 8:
-            value = (tile[index / 2] >> ((index & 1) != 0 ? 0 : 4)) & 15u;
-            if (format == 8) {
-                palette_index = value;
-                break;
-            }
-            memset(color, (int)(value * 17u), 4);
-            return true;
-        case 1:
-            memset(color, tile[index], 4);
-            return true;
-        case 2:
-            value = tile[index];
-            color[0] = (uint8_t)((value & 15u) * 17u);
-            color[1] = color[0];
-            color[2] = color[0];
-            color[3] = (uint8_t)((value >> 4) * 17u);
-            return true;
-        case 3:
-            value = cc_resource_be16(tile + index * 2);
-            color[0] = (uint8_t)value;
-            color[1] = color[0];
-            color[2] = color[0];
-            color[3] = (uint8_t)(value >> 8);
-            return true;
-        case 4:
-            cc_rgb565(cc_resource_be16(tile + index * 2), color);
-            return true;
-        case 5:
-            cc_rgb5a3(cc_resource_be16(tile + index * 2), color);
-            return true;
-        case 6:
-            color[0] = tile[index * 2 + 1];
-            color[1] = tile[32 + index * 2];
-            color[2] = tile[33 + index * 2];
-            color[3] = tile[index * 2];
-            return true;
-        case 9:
-            palette_index = tile[index];
-            break;
-        case 10:
-            palette_index = cc_resource_be16(tile + index * 2) & 0x3fffu;
-            break;
-        case 14: {
-            size_t subblock = (size_t)((y / 4 * 2 + x / 4) * 8);
-            uint16_t c0 = cc_resource_be16(tile + subblock);
-            uint16_t c1 = cc_resource_be16(tile + subblock + 2);
-            uint8_t first[4];
-            uint8_t second[4];
-            cc_rgb565(c0, first);
-            cc_rgb565(c1, second);
-            unsigned selector =
-                (tile[subblock + 4 + (size_t)(y % 4)] >> (6 - 2 * (x % 4))) & 3u;
-            if (selector == 0 || selector == 1) {
-                memcpy(color, selector == 0 ? first : second, 4);
-                return true;
-            }
-            for (int channel = 0; channel < 3; channel++) {
-                color[channel] =
-                    (uint8_t)(c0 > c1 ? (selector == 2 ? (5u * first[channel] +
-                                                          3u * second[channel]) >>
-                                                             3
-                                                       : (3u * first[channel] +
-                                                          5u * second[channel]) >>
-                                                             3)
-                                      : (first[channel] + second[channel]) / 2u);
-            }
-            color[3] = c0 <= c1 && selector == 3 ? 0 : 255;
-            return true;
-        }
-        default:
-            return false;
-    }
-
-    if (palette == NULL || palette_index >= palette_count) {
-        return false;
-    }
-    memcpy(color, palette + palette_index * 4, 4);
     return true;
 }
 
@@ -213,19 +64,14 @@ static bool cc_decode_image(const uint8_t *data, size_t size, size_t image_heade
     uint16_t width = cc_resource_be16(data + image_header + 2);
     uint32_t format = cc_resource_be32(data + image_header + 4);
     size_t offset = cc_resource_be32(data + image_header + 8);
-    CcTplShape shape;
-    if (height == 0 || width == 0 || !cc_shape(format, &shape)) {
+    size_t encoded_bytes;
+    size_t rgba_bytes;
+    if (!cc_gx_texture_size(format, width, height, &encoded_bytes, &rgba_bytes)) {
         cc_error_set(error, error_size, "Unsupported TPL image dimensions or format.");
         return false;
     }
-
-    size_t tiles_x = ((size_t)width + (size_t)shape.width - 1) / (size_t)shape.width;
-    size_t tiles_y = ((size_t)height + (size_t)shape.height - 1) / (size_t)shape.height;
-    size_t max_tiles = SIZE_MAX / (size_t)shape.bytes;
-    if (tiles_x > max_tiles / tiles_y ||
-        !cc_resource_range_fits(size, offset,
-                                tiles_x * tiles_y * (size_t)shape.bytes) ||
-        (size_t)width > CC_TPL_MAX_RGBA_BYTES / 4 / (size_t)height) {
+    if (!cc_resource_range_fits(size, offset, encoded_bytes) ||
+        rgba_bytes > CC_TPL_MAX_RGBA_BYTES) {
         cc_error_set(error, error_size, "TPL image data is truncated or too large.");
         return false;
     }
@@ -243,38 +89,24 @@ static bool cc_decode_image(const uint8_t *data, size_t size, size_t image_heade
         }
     }
 
-    uint8_t *rgba = malloc((size_t)width * height * 4);
+    uint8_t *rgba = malloc(rgba_bytes);
     if (rgba == NULL) {
         cc_error_set(error, error_size, "Out of memory decoding TPL image.");
         free(palette);
         return false;
     }
 
-    bool valid = true;
-    size_t tile_index = 0;
-    for (size_t by = 0; by < height && valid; by += (size_t)shape.height) {
-        for (size_t bx = 0; bx < width && valid; bx += (size_t)shape.width) {
-            const uint8_t *tile = data + offset + tile_index * (size_t)shape.bytes;
-            tile_index++;
-            for (int y = 0; y < shape.height && valid; y++) {
-                for (int x = 0; x < shape.width; x++) {
-                    if (bx + (size_t)x >= width || by + (size_t)y >= height) {
-                        continue;
-                    }
-                    uint8_t color[4];
-                    if (!cc_decode_pixel(tile, format, x, y, shape.width, palette,
-                                         palette_count, color)) {
-                        cc_error_set(error, error_size, "Invalid TPL palette index.");
-                        valid = false;
-                        break;
-                    }
-                    size_t pixel_offset =
-                        ((by + (size_t)y) * width + bx + (size_t)x) * 4;
-                    memcpy(rgba + pixel_offset, color, 4);
-                }
-            }
-        }
-    }
+    CcGxTexture texture = {.width = width,
+                           .height = height,
+                           .format = format,
+                           .pixels = data + offset,
+                           .pixel_bytes = encoded_bytes,
+                           .palette = palette,
+                           .palette_count = palette_count,
+                           .expansion = CC_GX_COLOR_REPLICATE};
+    bool valid = cc_gx_texture_decode(&texture, rgba, rgba_bytes);
+    if (!valid)
+        cc_error_set(error, error_size, "Invalid TPL palette index.");
     free(palette);
     if (!valid) {
         free(rgba);

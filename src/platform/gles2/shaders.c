@@ -7,6 +7,29 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define CC_MATERIAL_SAMPLING_SOURCE                                                    \
+    "float wrapAxis(float coordinate, float mode) {\n"                                 \
+    "    if (mode > 1.5) {\n"                                                          \
+    "        return 1.0 - abs(mod(coordinate, 2.0) - 1.0);\n"                          \
+    "    }\n"                                                                          \
+    "    if (mode > 0.5) {\n"                                                          \
+    "        return fract(coordinate);\n"                                              \
+    "    }\n"                                                                          \
+    "    return clamp(coordinate, 0.0, 1.0);\n"                                        \
+    "}\n"                                                                              \
+    "vec2 wrapUV(vec2 uv, vec2 mode) {\n"                                              \
+    "    return vec2(wrapAxis(uv.x, mode.x), wrapAxis(uv.y, mode.y));\n"               \
+    "}\n"                                                                              \
+    "vec2 samplingUV(vec2 uv, vec4 sampling) {\n"                                      \
+    "    if (sampling.z > 0.5) {\n"                                                    \
+    "        vec2 texel = min(floor(uv * sampling.xy), sampling.xy - vec2(1.0));\n"    \
+    "        uv = (texel + vec2(0.5)) / sampling.xy;\n"                                \
+    "    }\n"                                                                          \
+    "    if (sampling.w > 0.5)\n"                                                      \
+    "        uv.y = 1.0 - uv.y;\n"                                                     \
+    "    return uv;\n"                                                                 \
+    "}\n"
+
 static const char *const cc_vertex_source =
     "attribute vec2 a_position;\n"
     "attribute vec2 a_uv;\n"
@@ -89,21 +112,11 @@ static const char *const cc_material_fragment_source =
     "uniform vec4 u_alpha_compare;\n"
     "uniform vec2 u_wrap0;\n"
     "uniform vec2 u_wrap1;\n"
+    "uniform vec4 u_sampling0;\n"
+    "uniform vec4 u_sampling1;\n"
     "varying lowp vec4 v_color;\n"
     "varying CC_UV_PRECISION vec2 v_uv0;\n"
-    "varying CC_UV_PRECISION vec2 v_uv1;\n"
-    "float wrapAxis(float coordinate, float mode) {\n"
-    "    if (mode > 1.5) {\n"
-    "        return 1.0 - abs(mod(coordinate, 2.0) - 1.0);\n"
-    "    }\n"
-    "    if (mode > 0.5) {\n"
-    "        return fract(coordinate);\n"
-    "    }\n"
-    "    return clamp(coordinate, 0.0, 1.0);\n"
-    "}\n"
-    "vec2 wrapUV(vec2 uv, vec2 mode) {\n"
-    "    return vec2(wrapAxis(uv.x, mode.x), wrapAxis(uv.y, mode.y));\n"
-    "}\n"
+    "varying CC_UV_PRECISION vec2 v_uv1;\n" CC_MATERIAL_SAMPLING_SOURCE
     "bool compareAlpha(float kind, float value, float reference) {\n"
     "    if (kind < 0.5)\n"
     "        return false;\n"
@@ -124,9 +137,11 @@ static const char *const cc_material_fragment_source =
     "void main() {\n"
     "    vec4 pixel = u_registers[1];\n"
     "    if (u_texture_count > 0) {\n"
-    "        vec4 first = texture2D(u_texture0, wrapUV(v_uv0, u_wrap0));\n"
+    "        vec4 first = texture2D(u_texture0,\n"
+    "            samplingUV(wrapUV(v_uv0, u_wrap0), u_sampling0));\n"
     "        if (u_texture_count > 1) {\n"
-    "            vec4 second = texture2D(u_texture1, wrapUV(v_uv1, u_wrap1));\n"
+    "            vec4 second = texture2D(u_texture1,\n"
+    "                samplingUV(wrapUV(v_uv1, u_wrap1), u_sampling1));\n"
     "            vec4 sampleValue = mix(second, first, u_konst[3].a);\n"
     "            pixel = mix(u_registers[0], u_registers[1], sampleValue);\n"
     "        } else {\n"
@@ -317,8 +332,10 @@ static void cc_emit_tev_stage(CcShaderText *text, const CcTevKey *key, unsigned 
 
     cc_emit(text, "    // Original TEV stage %u.\n", index);
     if (slot < 4 && coord < 4) {
-        cc_emit(text, "    tex = texture2D(t%u, wrapUV(texUV%u, vec2(%u.0, %u.0)));\n",
-                slot, coord, key->wrap_s[slot], key->wrap_t[slot]);
+        cc_emit(text,
+                "    tex = texture2D(t%u,\n"
+                "        samplingUV(wrapUV(texUV%u, vec2(%u.0, %u.0)), sampling%u));\n",
+                slot, coord, key->wrap_s[slot], key->wrap_t[slot], slot);
     } else {
         cc_emit(text, "    tex = vec4(1.0);\n");
     }
@@ -362,24 +379,19 @@ static char *cc_tev_fragment_source(const CcTevKey *key) {
                    "uniform sampler2D t1;\n"
                    "uniform sampler2D t2;\n"
                    "uniform sampler2D t3;\n"
+                   "uniform vec4 sampling0;\n"
+                   "uniform vec4 sampling1;\n"
+                   "uniform vec4 sampling2;\n"
+                   "uniform vec4 sampling3;\n"
                    "uniform vec4 regs[3];\n"
                    "uniform vec4 kc[4];\n"
                    "varying CC_UV_PRECISION vec4 raster;\n"
                    "varying CC_UV_PRECISION vec2 texUV0;\n"
                    "varying CC_UV_PRECISION vec2 texUV1;\n"
                    "varying CC_UV_PRECISION vec2 texUV2;\n"
-                   "varying CC_UV_PRECISION vec2 texUV3;\n"
-                   "float wrapAxis(float coordinate, float mode) {\n"
-                   "    if (mode > 1.5)\n"
-                   "        return 1.0 - abs(mod(coordinate, 2.0) - 1.0);\n"
-                   "    if (mode > 0.5)\n"
-                   "        return fract(coordinate);\n"
-                   "    return clamp(coordinate, 0.0, 1.0);\n"
-                   "}\n"
-                   "vec2 wrapUV(vec2 uv, vec2 mode) {\n"
-                   "    return vec2(wrapAxis(uv.x, mode.x), wrapAxis(uv.y, mode.y));\n"
-                   "}\n"
-                   "vec3 tevColor8(vec3 value) {\n"
+                   "varying CC_UV_PRECISION vec2 texUV3;\n");
+    cc_emit(&text, "%s", CC_MATERIAL_SAMPLING_SOURCE);
+    cc_emit(&text, "vec3 tevColor8(vec3 value) {\n"
                    "    return mod(floor(value * 255.0 + 0.5), 256.0);\n"
                    "}\n"
                    "float tevAlpha8(float value) {\n"
@@ -629,6 +641,9 @@ CcTevProgram *cc_gles2_get_tev_program(CcTevProgram **programs, GLuint vertex_sh
         char name[4];
         snprintf(name, sizeof(name), "t%u", index);
         glUniform1i(glGetUniformLocation(program, name), (GLint)index);
+        char sampling_name[16];
+        snprintf(sampling_name, sizeof(sampling_name), "sampling%u", index);
+        entry->sampling_locations[index] = glGetUniformLocation(program, sampling_name);
     }
     return entry;
 }

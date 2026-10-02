@@ -2,13 +2,14 @@
 #define CONSOLE_COMMON_GLES2_SHADERS_H
 
 #include "console_common/platform/platform.h"
+#include "material.h"
 
 #include <GLES2/gl2.h>
 
 #include <stdbool.h>
 #include <stdint.h>
 
-enum { CC_ES2_TEV_STAGES = 6 };
+enum { CC_ES2_TEV_STAGES = CC_RENDER_TEV_STAGES };
 
 typedef struct CcTevKey {
     uint8_t stage_count;
@@ -25,6 +26,7 @@ typedef struct CcTevProgram {
     GLuint program;
     GLint registers_location;
     GLint konst_location;
+    GLint sampling_locations[CC_MATERIAL_TEXTURES];
     struct CcTevProgram *next;
 } CcTevProgram;
 

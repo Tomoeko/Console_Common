@@ -1,0 +1,253 @@
+#include "platform_metal_internal.h"
+
+#include <assert.h>
+#include <float.h>
+#include <math.h>
+#include <stdio.h>
+#include <string.h>
+
+static unsigned pipeline_count(CcMetalState *state) {
+    unsigned count = 0;
+    for (unsigned kind = 0; kind < 2; ++kind) {
+        for (unsigned blend = 0; blend < CC_MATERIAL_PIPELINE_VARIANTS; ++blend) {
+            count += state->material_pipelines[kind][blend] != nil;
+        }
+    }
+    return count;
+}
+
+static void test_material_preparation(CcPlatform *platform, CcMetalState *state) {
+    assert(pipeline_count(state) == 4);
+    for (unsigned depth = 0; depth < 17; ++depth) {
+        assert(state->depth_states[depth]);
+    }
+
+    CcMaterialQuad quad = {0};
+    quad.has_blend_mode = true;
+    quad.blend_mode[0] = 1;
+    quad.blend_mode[1] = 1;
+    quad.blend_mode[2] = 1;
+    cc_platform_prepare_material(platform, &quad);
+    assert(pipeline_count(state) == 5);
+    id<MTLRenderPipelineState> simple = state->material_pipelines[0][9];
+    assert(simple);
+
+    quad.tev_stage_count = 1;
+    cc_platform_prepare_material(platform, &quad);
+    assert(pipeline_count(state) == 6);
+    id<MTLRenderPipelineState> tev = state->material_pipelines[1][9];
+    assert(tev);
+    for (unsigned iteration = 0; iteration < 8; ++iteration) {
+        cc_platform_prepare_material(platform, &quad);
+        cc_platform_draw_material_quad(platform, &quad);
+    }
+    assert(state->material_pipelines[0][9] == simple);
+    assert(state->material_pipelines[1][9] == tev);
+    assert(pipeline_count(state) == 6);
+    assert(state->batch_count == 1);
+    assert(state->batches[0].state.kind == CC_BATCH_TEV);
+    assert(state->batches[0].state.blend_key == 9);
+
+    quad.blend_mode[1] = 8;
+    cc_platform_prepare_material(platform, &quad);
+    cc_platform_draw_material_quad(platform, &quad);
+    assert(pipeline_count(state) == 6);
+    assert(!cc_metal_material_pipeline(state, CC_BATCH_BASIC, 9));
+    assert(!cc_metal_material_pipeline(state, CC_BATCH_TEV, 65));
+}
+
+static void test_signed_quad(CcPlatform *platform, CcMetalState *state) {
+    cc_platform_begin(platform, (CcColor){0, 0, 0, 1});
+    size_t before = state->vertex_count;
+    CcQuad quad = {.x = 20,
+                   .y = 15,
+                   .width = -8,
+                   .height = -5,
+                   .u0 = 1,
+                   .v0 = 1,
+                   .u1 = 0,
+                   .v1 = 0,
+                   .color = {1, 1, 1, 1}};
+    cc_platform_draw_quad(platform, &quad);
+    assert(state->vertex_count == before + 6);
+    assert(state->vertices[before].x == 20);
+    assert(state->vertices[before + 1].x == 12);
+    assert(state->vertices[before + 2].y == 10);
+    quad.width = 0;
+    cc_platform_draw_quad(platform, &quad);
+    assert(state->vertex_count == before + 6);
+    quad.width = -8;
+    quad.height = 0;
+    cc_platform_draw_quad(platform, &quad);
+    assert(state->vertex_count == before + 6);
+}
+
+static void read_target_pixels(CcMetalState *state, uint32_t target,
+                               id<MTLBuffer> readback) {
+    id<MTLCommandBuffer> command = [state->command_queue commandBuffer];
+    assert(command);
+    id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
+    assert(blit);
+    [blit copyFromTexture:state->textures[target]
+                     sourceSlice:0
+                     sourceLevel:0
+                    sourceOrigin:MTLOriginMake(0, 0, 0)
+                      sourceSize:MTLSizeMake(4, 4, 1)
+                        toBuffer:readback
+               destinationOffset:0
+          destinationBytesPerRow:256
+        destinationBytesPerImage:1024];
+    [blit endEncoding];
+    [command commit];
+    [command waitUntilCompleted];
+    assert(command.status == MTLCommandBufferStatusCompleted);
+}
+
+static void assert_target_clip(CcPlatform *platform, CcMetalState *state,
+                               uint32_t target, id<MTLBuffer> readback,
+                               const CcClipRect *clip, unsigned first, unsigned last) {
+    assert(cc_platform_begin_target(platform, target, (CcColor){0, 0, 0, 1}));
+    cc_platform_set_clip(platform, clip);
+    CcQuad quad = {.width = 4, .height = 4, .color = {1, 0, 0, 1}};
+    cc_platform_draw_quad(platform, &quad);
+    cc_platform_end(platform);
+    cc_wait_for_metal(state);
+    read_target_pixels(state, target, readback);
+    const uint8_t *pixels = readback.contents;
+    for (unsigned y = 0; y < 4; ++y) {
+        for (unsigned x = 0; x < 4; ++x) {
+            const uint8_t *bgra = pixels + y * 256 + x * 4;
+            bool inside = x >= first && x < last && y >= first && y < last;
+            assert(bgra[0] == 0 && bgra[1] == 0 && bgra[3] == 255);
+            assert(bgra[2] == (inside ? 255 : 0));
+        }
+    }
+}
+
+static void test_clip_rendering(CcPlatform *platform, CcMetalState *state) {
+    uint32_t target = cc_platform_create_render_texture(platform);
+    assert(target);
+    /* Render targets use private GPU storage; read through an aligned blit. */
+    id<MTLBuffer> readback =
+        [state->device newBufferWithLength:1024 options:MTLResourceStorageModeShared];
+    assert(readback);
+    assert_target_clip(platform, state, target, readback, NULL, 0, 4);
+    CcClipRect clip = {1.25f, 1.25f, 1.5f, 1.5f};
+    assert_target_clip(platform, state, target, readback, &clip, 1, 3);
+    const CcClipRect invalid[] = {{NAN, 0, 4, 4},
+                                  {0, NAN, 4, 4},
+                                  {0, 0, INFINITY, 4},
+                                  {0, 0, 4, -INFINITY},
+                                  {FLT_MAX, FLT_MAX, FLT_MAX, FLT_MAX},
+                                  {0, 0, -4, 4}};
+    for (unsigned index = 0; index < sizeof(invalid) / sizeof(invalid[0]); ++index)
+        assert_target_clip(platform, state, target, readback, &invalid[index], 0, 0);
+    cc_platform_destroy_texture(platform, target);
+}
+
+static CcMaterialQuad sampling_quad(uint32_t texture, unsigned stage_count) {
+    CcMaterialQuad quad = {0};
+    quad.texture_count = 1;
+    quad.textures[0] = texture;
+    quad.has_blend_mode = true;
+    quad.tev_stage_count = (uint8_t)stage_count;
+    memset(quad.tev_swap_table, 0xe4, sizeof(quad.tev_swap_table));
+    quad.tev_stages[0][4] = 0x8f;
+    quad.tev_stages[0][5] = 0xfa;
+    quad.tev_stages[0][7] = 1;
+    quad.tev_stages[0][8] = 0x47;
+    quad.tev_stages[0][9] = 0x75;
+    quad.tev_stages[0][11] = 1;
+    for (unsigned component = 0; component < 4; ++component)
+        quad.registers[1][component] = 1;
+    for (unsigned vertex = 0; vertex < 4; ++vertex) {
+        quad.vertices[vertex].x = vertex & 1 ? 1 : 0;
+        quad.vertices[vertex].y = vertex & 2 ? 4 : 0;
+        quad.vertices[vertex].color = (CcColor){1, 1, 1, 1};
+        for (unsigned slot = 0; slot < 2; ++slot) {
+            quad.vertices[vertex].uv[slot][0] = 0.4f;
+            quad.vertices[vertex].uv[slot][1] = 0.5f;
+        }
+    }
+    return quad;
+}
+
+static void test_material_sampling(CcPlatform *platform, CcMetalState *state) {
+    const uint8_t gradient[8] = {0, 0, 0, 255, 255, 255, 255, 255};
+    uint32_t texture = cc_platform_create_texture(platform, 2, 1, gradient);
+    uint32_t target = cc_platform_create_render_texture(platform);
+    assert(texture && target);
+    id<MTLBuffer> readback =
+        [state->device newBufferWithLength:1024 options:MTLResourceStorageModeShared];
+    assert(readback);
+    for (unsigned stage_count = 0; stage_count <= 1; ++stage_count) {
+        assert(cc_platform_begin_target(platform, target, (CcColor){0, 0, 0, 1}));
+        for (unsigned column = 0; column < 4; ++column) {
+            CcMaterialQuad quad = sampling_quad(texture, stage_count);
+            quad.nearest[0] = !(column & 1);
+            for (unsigned vertex = 0; vertex < 4; ++vertex)
+                quad.vertices[vertex].x += (float)column;
+            cc_platform_draw_material_quad(platform, &quad);
+        }
+        assert(state->batch_count == 4);
+        cc_platform_end(platform);
+        cc_wait_for_metal(state);
+        read_target_pixels(state, target, readback);
+        const uint8_t *pixels = readback.contents;
+        for (unsigned y = 0; y < 4; ++y) {
+            for (unsigned x = 0; x < 4; ++x) {
+                const uint8_t *bgra = pixels + y * 256 + x * 4;
+                unsigned expected = x & 1 ? 77 : 0;
+                for (unsigned component = 0; component < 3; ++component)
+                    assert(bgra[component] >= (expected ? expected - 1 : 0) &&
+                           bgra[component] <= expected + (expected ? 1 : 0));
+            }
+        }
+    }
+    CcMaterialQuad mixed = sampling_quad(texture, 0);
+    mixed.texture_count = 2;
+    mixed.textures[1] = texture;
+    mixed.nearest[0] = true;
+    mixed.konst_colors[3][3] = 0.5f;
+    assert(cc_platform_begin_target(platform, target, (CcColor){0, 0, 0, 1}));
+    cc_platform_draw_material_quad(platform, &mixed);
+    CcQuad basic = {.x = 1,
+                    .width = 1,
+                    .height = 4,
+                    .u0 = 0.4f,
+                    .u1 = 0.4f,
+                    .v0 = 0.5f,
+                    .v1 = 0.5f,
+                    .color = {1, 1, 1, 1},
+                    .texture = texture};
+    cc_platform_draw_quad(platform, &basic);
+    cc_platform_end(platform);
+    cc_wait_for_metal(state);
+    read_target_pixels(state, target, readback);
+    const uint8_t *pixels = readback.contents;
+    for (unsigned component = 0; component < 3; ++component) {
+        assert(pixels[component] >= 37 && pixels[component] <= 39);
+        assert(pixels[4 + component] >= 76 && pixels[4 + component] <= 78);
+    }
+    cc_platform_destroy_texture(platform, target);
+    cc_platform_destroy_texture(platform, texture);
+}
+
+int main(void) {
+    @autoreleasepool {
+        if (!MTLCreateSystemDefaultDevice()) {
+            fputs("Metal unavailable; backend test skipped.\n", stderr);
+            return 77;
+        }
+        CcMetalState *state = [CcMetalState new];
+        assert(cc_prepare_metal(state));
+        CcPlatform platform = {.metal_state = (__bridge void *)state};
+        test_material_preparation(&platform, state);
+        test_signed_quad(&platform, state);
+        test_clip_rendering(&platform, state);
+        test_material_sampling(&platform, state);
+        cc_wait_for_metal(state);
+        cc_release_metal(state);
+    }
+    return 0;
+}

@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.20)
 
 project(ConsoleCommon VERSION 0.1.0 LANGUAGES C)
 
-# Wii defaults remain compatible; each consumer chooses its source projection.
+# Default projection remains compatible; consumers choose their dimensions.
 set(CC_FRAME_WIDTH 640 CACHE STRING "Logical framebuffer width")
 set(CC_FRAME_HEIGHT 456 CACHE STRING "Logical framebuffer height")
 set(CC_ASPECT_WIDTH 16 CACHE STRING "Displayed aspect numerator")
@@ -14,12 +14,15 @@ foreach(value CC_FRAME_WIDTH CC_FRAME_HEIGHT CC_ASPECT_WIDTH CC_ASPECT_HEIGHT)
 endforeach()
 
 add_library(console_common STATIC
+    src/render/clip.c
     src/render/frame_damage.c
     src/render/image.c
+    src/render/material.c
     src/render/material_blend.c
     src/render/texture_cache.c
     src/render/texture_source.c
     src/render/viewport.c
+    src/resources/gx_texture.c
     src/resources/resource_tpl.c
     src/support/atomic_file.c
     src/support/error.c
@@ -57,10 +60,12 @@ macro(cc_add_platform target backend)
         enable_language(OBJC)
         target_sources(${target} PRIVATE
             "${common_root}/src/platform/metal/platform_metal.m"
+            "${common_root}/src/platform/metal/pipeline.m"
             "${common_root}/src/platform/metal/platform_metal_window.m"
             "${common_root}/src/platform/metal/shaders.m")
         set_source_files_properties(
             "${common_root}/src/platform/metal/platform_metal.m"
+            "${common_root}/src/platform/metal/pipeline.m"
             "${common_root}/src/platform/metal/platform_metal_window.m"
             "${common_root}/src/platform/metal/shaders.m"
             PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
@@ -80,7 +85,8 @@ macro(cc_add_platform target backend)
             "${common_root}/src/platform/gles2/platform_gles2.c"
             "${common_root}/src/platform/gles2/retained_frame.c"
             "${common_root}/src/platform/gles2/host.c"
-            "${common_root}/src/platform/gles2/shaders.c")
+            "${common_root}/src/platform/gles2/shaders.c"
+            "${common_root}/src/platform/gles2/texture_dimensions.c")
         target_link_libraries(${target} PRIVATE
             X11::X11 ${CC_EGL_LIBRARY} ${CC_GLES2_LIBRARY} m)
     else()

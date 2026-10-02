@@ -1,4 +1,5 @@
 #include "console_common/render/image.h"
+#include "console_common/support/endian.h"
 
 #include "../support/atomic_file.h"
 #include "image_internal.h"
@@ -8,18 +9,6 @@
 #include <string.h>
 
 enum { CC_IMAGE_HEADER_SIZE = 16, CC_IMAGE_MAX_DIMENSION = 8192 };
-
-static uint32_t read_u32(const uint8_t *bytes) {
-    return (uint32_t)bytes[0] | ((uint32_t)bytes[1] << 8) | ((uint32_t)bytes[2] << 16) |
-           ((uint32_t)bytes[3] << 24);
-}
-
-static void write_u32(uint8_t *bytes, uint32_t value) {
-    bytes[0] = (uint8_t)value;
-    bytes[1] = (uint8_t)(value >> 8);
-    bytes[2] = (uint8_t)(value >> 16);
-    bytes[3] = (uint8_t)(value >> 24);
-}
 
 static bool image_size(uint32_t width, uint32_t height, size_t *size) {
     if (!width || !height || width > CC_IMAGE_MAX_DIMENSION ||
@@ -36,11 +25,11 @@ static bool read_image_header(FILE *stream, uint32_t *width, uint32_t *height,
                               size_t *size) {
     uint8_t header[CC_IMAGE_HEADER_SIZE];
     if (fread(header, 1, sizeof(header), stream) != sizeof(header) ||
-        memcmp(header, "WMRA", 4) != 0 || read_u32(header + 4) != 1) {
+        memcmp(header, "WMRA", 4) != 0 || cc_read_le32(header + 4) != 1) {
         return false;
     }
-    *width = read_u32(header + 8);
-    *height = read_u32(header + 12);
+    *width = cc_read_le32(header + 8);
+    *height = cc_read_le32(header + 12);
     return image_size(*width, *height, size);
 }
 
@@ -104,9 +93,9 @@ bool cc_image_write(const char *path, const CcImage *image) {
     if (!image_size(image->width, image->height, &size))
         return false;
     uint8_t header[CC_IMAGE_HEADER_SIZE] = {'W', 'M', 'R', 'A'};
-    write_u32(header + 4, 1);
-    write_u32(header + 8, image->width);
-    write_u32(header + 12, image->height);
+    cc_write_le32(header + 4, 1);
+    cc_write_le32(header + 8, image->width);
+    cc_write_le32(header + 12, image->height);
     CcAtomicFile output;
     if (cc_atomic_file_open(&output, path) != CC_ATOMIC_FILE_OK)
         return false;

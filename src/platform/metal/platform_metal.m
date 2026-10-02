@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "geometry.h"
+#include "clip.h"
 #include "material_blend.h"
 #include "material_depth.h"
 #include "shaders.h"
@@ -69,85 +70,6 @@ static uint32_t cc_store_texture(CcMetalState *state, id<MTLTexture> texture) {
     return handle;
 }
 
-enum { CC_BLEND_DISABLED = 64, CC_BLEND_DEFAULT = 4 * 8 + 5 };
-
-static id<MTLRenderPipelineState>
-cc_make_pipeline(CcMetalState *state, id<MTLFunction> fragment, uint8_t blend_key) {
-    static const MTLBlendFactor factors[8] = {
-        MTLBlendFactorZero,
-        MTLBlendFactorOne,
-        MTLBlendFactorDestinationColor,
-        MTLBlendFactorOneMinusDestinationColor,
-        MTLBlendFactorSourceAlpha,
-        MTLBlendFactorOneMinusSourceAlpha,
-        MTLBlendFactorDestinationAlpha,
-        MTLBlendFactorOneMinusDestinationAlpha,
-    };
-
-    MTLRenderPipelineDescriptor *description = [MTLRenderPipelineDescriptor new];
-    description.vertexFunction = state->vertex_function;
-    description.fragmentFunction = fragment;
-    description.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
-    MTLRenderPipelineColorAttachmentDescriptor *attachment =
-        description.colorAttachments[0];
-    attachment.pixelFormat = MTLPixelFormatBGRA8Unorm;
-    attachment.blendingEnabled = blend_key != CC_BLEND_DISABLED;
-    if (blend_key != CC_BLEND_DISABLED) {
-        attachment.rgbBlendOperation = MTLBlendOperationAdd;
-        attachment.alphaBlendOperation = MTLBlendOperationAdd;
-        attachment.sourceRGBBlendFactor = factors[blend_key / 8];
-        attachment.destinationRGBBlendFactor = factors[blend_key % 8];
-        attachment.sourceAlphaBlendFactor = MTLBlendFactorOne;
-        attachment.destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
-    }
-    NSError *error = nil;
-    id<MTLRenderPipelineState> pipeline =
-        [state->device newRenderPipelineStateWithDescriptor:description error:&error];
-    if (!pipeline) {
-        const char *message = error.localizedDescription.UTF8String;
-        fprintf(stderr, "Metal pipeline unavailable: %s\n",
-                message ? message : "unknown error");
-    }
-    return pipeline;
-}
-
-static id<MTLRenderPipelineState>
-cc_material_pipeline(CcMetalState *state, CcBatchKind kind, uint8_t blend_key) {
-    NSNumber *key = @((NSUInteger)kind * 65u + blend_key);
-    id<MTLRenderPipelineState> pipeline = state->material_pipelines[key];
-    if (!pipeline) {
-        /* Pipeline variants are cached; the shader library is compiled once. */
-        id<MTLFunction> fragment = kind == CC_BATCH_TEV
-                                       ? state->tev_fragment_function
-                                       : state->material_fragment_function;
-        pipeline = cc_make_pipeline(state, fragment, blend_key);
-        if (pipeline) {
-            state->material_pipelines[key] = pipeline;
-        }
-    }
-    return pipeline;
-}
-
-static bool cc_prepare_depth_states(CcMetalState *state) {
-    static const MTLCompareFunction comparisons[8] = {
-        MTLCompareFunctionNever,        MTLCompareFunctionLess,
-        MTLCompareFunctionEqual,        MTLCompareFunctionLessEqual,
-        MTLCompareFunctionGreater,      MTLCompareFunctionNotEqual,
-        MTLCompareFunctionGreaterEqual, MTLCompareFunctionAlways,
-    };
-    for (unsigned key = 0; key < 17; ++key) {
-        MTLDepthStencilDescriptor *descriptor = [MTLDepthStencilDescriptor new];
-        descriptor.depthCompareFunction =
-            key ? comparisons[(key - 1) / 2] : MTLCompareFunctionAlways;
-        descriptor.depthWriteEnabled = key && ((key - 1) & 1);
-        state->depth_states[key] =
-            [state->device newDepthStencilStateWithDescriptor:descriptor];
-        if (!state->depth_states[key])
-            return false;
-    }
-    return true;
-}
-
 static id<MTLTexture> cc_depth_texture(CcMetalState *state, NSUInteger slot,
                                        bool offscreen, NSUInteger width,
                                        NSUInteger height) {
@@ -200,34 +122,29 @@ bool cc_prepare_metal(CcMetalState *state) {
         fprintf(stderr, "Metal shader entry point unavailable.\n");
         return false;
     }
-    state->pipeline = cc_make_pipeline(state, basic_fragment, CC_BLEND_DEFAULT);
-    state->material_pipelines = [NSMutableDictionary dictionary];
-    if (!state->pipeline || !state->command_queue || !cc_prepare_depth_states(state)) {
-        return false;
-    }
-    if (!cc_material_pipeline(state, CC_BATCH_MATERIAL, CC_BLEND_DEFAULT) ||
-        !cc_material_pipeline(state, CC_BATCH_MATERIAL, CC_BLEND_DISABLED) ||
-        !cc_material_pipeline(state, CC_BATCH_TEV, CC_BLEND_DEFAULT) ||
-        !cc_material_pipeline(state, CC_BATCH_TEV, CC_BLEND_DISABLED)) {
+    if (!state->command_queue || !cc_metal_prepare_pipelines(state, basic_fragment)) {
         return false;
     }
 
     MTLSamplerDescriptor *sampler_description = [MTLSamplerDescriptor new];
-    sampler_description.minFilter = MTLSamplerMinMagFilterLinear;
-    sampler_description.magFilter = MTLSamplerMinMagFilterLinear;
     const MTLSamplerAddressMode wraps[3] = {
         MTLSamplerAddressModeClampToEdge,
         MTLSamplerAddressModeRepeat,
         MTLSamplerAddressModeMirrorRepeat,
     };
-    for (unsigned s = 0; s < 3; ++s) {
-        for (unsigned t = 0; t < 3; ++t) {
-            sampler_description.sAddressMode = wraps[s];
-            sampler_description.tAddressMode = wraps[t];
-            state->samplers[s][t] =
-                [state->device newSamplerStateWithDescriptor:sampler_description];
-            if (!state->samplers[s][t]) {
-                return false;
+    for (unsigned nearest = 0; nearest < 2; ++nearest) {
+        MTLSamplerMinMagFilter filter =
+            nearest ? MTLSamplerMinMagFilterNearest : MTLSamplerMinMagFilterLinear;
+        sampler_description.minFilter = sampler_description.magFilter = filter;
+        for (unsigned s = 0; s < 3; ++s) {
+            for (unsigned t = 0; t < 3; ++t) {
+                sampler_description.sAddressMode = wraps[s];
+                sampler_description.tAddressMode = wraps[t];
+                state->samplers[nearest][s][t] =
+                    [state->device newSamplerStateWithDescriptor:sampler_description];
+                if (!state->samplers[nearest][s][t]) {
+                    return false;
+                }
             }
         }
     }
@@ -361,6 +278,7 @@ static bool cc_batch_states_equal(const CcBatchState *left, const CcBatchState *
         memcmp(left->textures, right->textures, sizeof(left->textures)) != 0 ||
         memcmp(left->wrap_s, right->wrap_s, sizeof(left->wrap_s)) != 0 ||
         memcmp(left->wrap_t, right->wrap_t, sizeof(left->wrap_t)) != 0 ||
+        memcmp(left->nearest, right->nearest, sizeof(left->nearest)) != 0 ||
         left->blend_key != right->blend_key || left->depth_key != right->depth_key) {
         return false;
     }
@@ -408,7 +326,7 @@ static void cc_queue_quad(CcMetalState *state, const CcBatchState *batch_state,
 }
 
 void cc_platform_draw_quad(CcPlatform *platform, const CcQuad *quad) {
-    if (!quad || quad->width <= 0 || quad->height <= 0) {
+    if (!cc_render_quad_has_area(quad)) {
         return;
     }
 
@@ -437,23 +355,17 @@ void cc_platform_draw_vertices(CcPlatform *platform, const CcDrawVertex corners[
 }
 
 static bool cc_metal_tev_supported(CcMetalState *state, const CcMaterialQuad *quad) {
-    if (quad->tev_stage_count == 0 || quad->tev_stage_count > 6) {
-        return false;
-    }
-    bool invalid = quad->has_alpha_compare &&
-                   ((quad->alpha_compare[0] & 15) > 7 ||
-                    (quad->alpha_compare[0] >> 4) > 7 || quad->alpha_compare[1] > 3);
-    for (unsigned stage = 0; stage < quad->tev_stage_count; ++stage) {
-        const uint8_t *bytes = quad->tev_stages[stage];
-        invalid = invalid || (bytes[8] & 15) > 7 || (bytes[8] >> 4) > 7 ||
-                  (bytes[9] & 15) > 7 || (bytes[9] >> 4) > 7;
-    }
-    if (invalid && !state->warned_tev_encoding) {
+    CcTevSupport support = cc_material_tev_support(quad, true);
+    if (support == CC_TEV_STAGE_LIMIT && !state->warned_tev_limit) {
+        fprintf(stderr, "Metal: materials with over six TEV stages use the "
+                        "simple material fallback.\n");
+        state->warned_tev_limit = true;
+    } else if (support == CC_TEV_INVALID_ENCODING && !state->warned_tev_encoding) {
         fprintf(stderr, "Metal: invalid TEV selector encoding uses the "
                         "simple material fallback.\n");
         state->warned_tev_encoding = true;
     }
-    return !invalid;
+    return support == CC_TEV_SUPPORTED;
 }
 
 void cc_platform_draw_material_quad(CcPlatform *platform, const CcMaterialQuad *quad) {
@@ -466,12 +378,6 @@ void cc_platform_draw_material_quad(CcPlatform *platform, const CcMaterialQuad *
     if (!cc_material_blend_resolve(quad, &blend) ||
         !cc_material_depth_key(quad, &depth_key)) {
         return;
-    }
-
-    if (quad->tev_stage_count > 6 && !state->warned_tev_limit) {
-        fprintf(stderr, "Metal: materials with over six TEV stages use the "
-                        "simple material fallback.\n");
-        state->warned_tev_limit = true;
     }
 
     CcVertex vertices[4] = {0};
@@ -492,6 +398,7 @@ void cc_platform_draw_material_quad(CcPlatform *platform, const CcMaterialQuad *
         batch.textures[index] = cc_resolve_texture(state, quad->textures[index]);
         batch.wrap_s[index] = quad->wrap_s[index] < 3 ? quad->wrap_s[index] : 0;
         batch.wrap_t[index] = quad->wrap_t[index] < 3 ? quad->wrap_t[index] : 0;
+        batch.nearest[index] = quad->nearest[index];
     }
     batch.blend_key = blend.enabled ? (uint8_t)(blend.source * 8 + blend.destination)
                                     : CC_BLEND_DISABLED;
@@ -540,10 +447,19 @@ void cc_platform_draw_material_quad(CcPlatform *platform, const CcMaterialQuad *
 }
 
 void cc_platform_prepare_material(CcPlatform *platform, const CcMaterialQuad *quad) {
-    /* Both material fragment functions and stock blend pipelines are ready
-     * when the Metal platform is created. */
-    (void)platform;
-    (void)quad;
+    CcMetalState *state = cc_state(platform);
+    CcMaterialBlend blend;
+    unsigned depth_key;
+    if (!state || !quad || quad->texture_count > CC_MATERIAL_TEXTURES ||
+        !cc_material_blend_resolve(quad, &blend) ||
+        !cc_material_depth_key(quad, &depth_key)) {
+        return;
+    }
+    CcBatchKind kind =
+        cc_metal_tev_supported(state, quad) ? CC_BATCH_TEV : CC_BATCH_MATERIAL;
+    uint8_t blend_key = blend.enabled ? (uint8_t)(blend.source * 8 + blend.destination)
+                                      : CC_BLEND_DISABLED;
+    (void)cc_metal_material_pipeline(state, kind, blend_key);
 }
 
 static bool cc_upload_vertices(CcMetalState *state, NSUInteger slot) {
@@ -582,35 +498,12 @@ static bool cc_upload_vertices(CcMetalState *state, NSUInteger slot) {
     return true;
 }
 
-static NSUInteger cc_scissor_coordinate(double value, NSUInteger limit) {
-    if (value <= 0.0)
-        return 0;
-    if (value >= (double)limit)
-        return limit;
-    return (NSUInteger)value;
-}
-
 static MTLScissorRect cc_batch_scissor(const CcBatchState *batch, CcViewport viewport) {
-    if (!batch->clip_enabled)
-        return (MTLScissorRect){(NSUInteger)viewport.x, (NSUInteger)viewport.y,
-                                (NSUInteger)viewport.width,
-                                (NSUInteger)viewport.height};
-    double scale_x = (double)viewport.width / CC_FRAME_WIDTH;
-    double scale_y = (double)viewport.height / CC_FRAME_HEIGHT;
-    double left = floor((double)batch->clip.x * scale_x);
-    double top = floor((double)batch->clip.y * scale_y);
-    double right = ceil((double)(batch->clip.x + batch->clip.width) * scale_x);
-    double bottom = ceil((double)(batch->clip.y + batch->clip.height) * scale_y);
-    NSUInteger x0 = cc_scissor_coordinate(left, (NSUInteger)viewport.width);
-    NSUInteger y0 = cc_scissor_coordinate(top, (NSUInteger)viewport.height);
-    NSUInteger x1 = cc_scissor_coordinate(right, (NSUInteger)viewport.width);
-    NSUInteger y1 = cc_scissor_coordinate(bottom, (NSUInteger)viewport.height);
-    if (x1 < x0)
-        x1 = x0;
-    if (y1 < y0)
-        y1 = y0;
-    return (MTLScissorRect){x0 + (NSUInteger)viewport.x, y0 + (NSUInteger)viewport.y,
-                            x1 - x0, y1 - y0};
+    const CcClipRect *rect = batch->clip_enabled ? &batch->clip : NULL;
+    CcViewport clip = cc_render_clip_pixels(rect, viewport.width, viewport.height);
+    return (MTLScissorRect){(NSUInteger)(viewport.x + clip.x),
+                            (NSUInteger)(viewport.y + clip.y), (NSUInteger)clip.width,
+                            (NSUInteger)clip.height};
 }
 
 static void cc_bind_batch_resources(CcMetalState *state,
@@ -625,7 +518,8 @@ static void cc_bind_batch_resources(CcMetalState *state,
         id<MTLTexture> texture =
             entry == [NSNull null] ? [state->textures objectAtIndex:0] : entry;
         [encoder setFragmentTexture:texture atIndex:slot_index];
-        [encoder setFragmentSamplerState:state->samplers[batch->wrap_s[slot_index]]
+        [encoder setFragmentSamplerState:state->samplers[batch->nearest[slot_index]]
+                                                        [batch->wrap_s[slot_index]]
                                                         [batch->wrap_t[slot_index]]
                                  atIndex:slot_index];
     }
@@ -669,7 +563,7 @@ static void cc_encode_batches(CcMetalState *state, id<MTLRenderCommandEncoder> e
         CcBatchKind kind = batch->state.kind;
         id<MTLRenderPipelineState> pipeline =
             kind != CC_BATCH_BASIC
-                ? cc_material_pipeline(state, kind, batch->state.blend_key)
+                ? cc_metal_material_pipeline(state, kind, batch->state.blend_key)
                 : state->pipeline;
         if (!pipeline) {
             continue;

@@ -105,6 +105,7 @@ bool cc_frame_damage_material(CcFrameDamage *damage, const CcMaterialQuad *quad,
     memcpy(copy->textures, quad->textures, sizeof(copy->textures));
     memcpy(copy->wrap_s, quad->wrap_s, sizeof(copy->wrap_s));
     memcpy(copy->wrap_t, quad->wrap_t, sizeof(copy->wrap_t));
+    memcpy(copy->nearest, quad->nearest, sizeof(copy->nearest));
     copy->texture_count = quad->texture_count;
     memcpy(copy->registers, quad->registers, sizeof(copy->registers));
     memcpy(copy->konst_colors, quad->konst_colors, sizeof(copy->konst_colors));
