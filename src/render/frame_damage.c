@@ -113,8 +113,10 @@ bool cc_frame_damage_material(CcFrameDamage *damage, const CcMaterialQuad *quad,
     memcpy(copy->tev_swap_table, quad->tev_swap_table, sizeof(copy->tev_swap_table));
     memcpy(copy->alpha_compare, quad->alpha_compare, sizeof(copy->alpha_compare));
     memcpy(copy->blend_mode, quad->blend_mode, sizeof(copy->blend_mode));
+    memcpy(copy->depth_mode, quad->depth_mode, sizeof(copy->depth_mode));
     copy->has_alpha_compare = quad->has_alpha_compare;
     copy->has_blend_mode = quad->has_blend_mode;
+    copy->has_depth_mode = quad->has_depth_mode;
     float positions[4][2];
     for (size_t index = 0; index < 4; index++) {
         positions[index][0] = quad->vertices[index].x;

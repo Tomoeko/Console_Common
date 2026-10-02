@@ -20,7 +20,8 @@ typedef struct CcVertex {
     float x;
     float y;
     float uv[CC_MATERIAL_TEXTURES][2];
-    float padding[2];
+    float depth;
+    float clip_w;
     CcColor color;
 } CcVertex;
 
@@ -70,6 +71,7 @@ typedef struct CcBatchState {
     uint8_t wrap_s[CC_MATERIAL_TEXTURES];
     uint8_t wrap_t[CC_MATERIAL_TEXTURES];
     uint8_t blend_key;
+    uint8_t depth_key;
     union {
         CcMaterialParams simple;
         CcTevParams tev;
@@ -115,6 +117,9 @@ struct CcPlatform {
     id<MTLFunction> material_fragment_function;
     id<MTLFunction> tev_fragment_function;
     NSMutableDictionary<NSNumber *, id<MTLRenderPipelineState>> *material_pipelines;
+    id<MTLDepthStencilState> depth_states[17];
+    id<MTLTexture> window_depth[CC_IN_FLIGHT_FRAMES];
+    id<MTLTexture> target_depth[CC_IN_FLIGHT_FRAMES];
     id<MTLSamplerState> samplers[3][3];
     MTLRenderPassDescriptor *render_pass;
     NSMutableArray *textures;

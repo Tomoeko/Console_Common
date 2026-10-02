@@ -7,6 +7,7 @@
 
 #include "geometry.h"
 #include "material_blend.h"
+#include "material_depth.h"
 #include "shaders.h"
 #include "console_common/render/viewport.h"
 
@@ -86,6 +87,7 @@ cc_make_pipeline(CcMetalState *state, id<MTLFunction> fragment, uint8_t blend_ke
     MTLRenderPipelineDescriptor *description = [MTLRenderPipelineDescriptor new];
     description.vertexFunction = state->vertex_function;
     description.fragmentFunction = fragment;
+    description.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
     MTLRenderPipelineColorAttachmentDescriptor *attachment =
         description.colorAttachments[0];
     attachment.pixelFormat = MTLPixelFormatBGRA8Unorm;
@@ -126,6 +128,48 @@ cc_material_pipeline(CcMetalState *state, CcBatchKind kind, uint8_t blend_key) {
     return pipeline;
 }
 
+static bool cc_prepare_depth_states(CcMetalState *state) {
+    static const MTLCompareFunction comparisons[8] = {
+        MTLCompareFunctionNever,        MTLCompareFunctionLess,
+        MTLCompareFunctionEqual,        MTLCompareFunctionLessEqual,
+        MTLCompareFunctionGreater,      MTLCompareFunctionNotEqual,
+        MTLCompareFunctionGreaterEqual, MTLCompareFunctionAlways,
+    };
+    for (unsigned key = 0; key < 17; ++key) {
+        MTLDepthStencilDescriptor *descriptor = [MTLDepthStencilDescriptor new];
+        descriptor.depthCompareFunction =
+            key ? comparisons[(key - 1) / 2] : MTLCompareFunctionAlways;
+        descriptor.depthWriteEnabled = key && ((key - 1) & 1);
+        state->depth_states[key] =
+            [state->device newDepthStencilStateWithDescriptor:descriptor];
+        if (!state->depth_states[key])
+            return false;
+    }
+    return true;
+}
+
+static id<MTLTexture> cc_depth_texture(CcMetalState *state, NSUInteger slot,
+                                       bool offscreen, NSUInteger width,
+                                       NSUInteger height) {
+    id<MTLTexture> texture =
+        offscreen ? state->target_depth[slot] : state->window_depth[slot];
+    if (texture && texture.width == width && texture.height == height)
+        return texture;
+    MTLTextureDescriptor *descriptor = [MTLTextureDescriptor
+        texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float
+                                     width:width
+                                    height:height
+                                 mipmapped:NO];
+    descriptor.usage = MTLTextureUsageRenderTarget;
+    descriptor.storageMode = MTLStorageModePrivate;
+    texture = [state->device newTextureWithDescriptor:descriptor];
+    if (offscreen)
+        state->target_depth[slot] = texture;
+    else
+        state->window_depth[slot] = texture;
+    return texture;
+}
+
 bool cc_prepare_metal(CcMetalState *state) {
     state->device = MTLCreateSystemDefaultDevice();
     if (!state->device) {
@@ -158,7 +202,7 @@ bool cc_prepare_metal(CcMetalState *state) {
     }
     state->pipeline = cc_make_pipeline(state, basic_fragment, CC_BLEND_DEFAULT);
     state->material_pipelines = [NSMutableDictionary dictionary];
-    if (!state->pipeline || !state->command_queue) {
+    if (!state->pipeline || !state->command_queue || !cc_prepare_depth_states(state)) {
         return false;
     }
     if (!cc_material_pipeline(state, CC_BATCH_MATERIAL, CC_BLEND_DEFAULT) ||
@@ -295,7 +339,7 @@ static bool cc_reserve_batches(CcMetalState *state, size_t count) {
 }
 
 static CcVertex cc_vertex(float x, float y, float u, float v, CcColor color) {
-    CcVertex vertex = {.x = x, .y = y, .color = color};
+    CcVertex vertex = {.x = x, .y = y, .clip_w = 1, .color = color};
     vertex.uv[0][0] = u;
     vertex.uv[0][1] = v;
     return vertex;
@@ -317,7 +361,7 @@ static bool cc_batch_states_equal(const CcBatchState *left, const CcBatchState *
         memcmp(left->textures, right->textures, sizeof(left->textures)) != 0 ||
         memcmp(left->wrap_s, right->wrap_s, sizeof(left->wrap_s)) != 0 ||
         memcmp(left->wrap_t, right->wrap_t, sizeof(left->wrap_t)) != 0 ||
-        left->blend_key != right->blend_key) {
+        left->blend_key != right->blend_key || left->depth_key != right->depth_key) {
         return false;
     }
     if (left->kind == CC_BATCH_MATERIAL) {
@@ -418,7 +462,9 @@ void cc_platform_draw_material_quad(CcPlatform *platform, const CcMaterialQuad *
         return;
     }
     CcMaterialBlend blend;
-    if (!cc_material_blend_resolve(quad, &blend)) {
+    unsigned depth_key;
+    if (!cc_material_blend_resolve(quad, &blend) ||
+        !cc_material_depth_key(quad, &depth_key)) {
         return;
     }
 
@@ -432,6 +478,8 @@ void cc_platform_draw_material_quad(CcPlatform *platform, const CcMaterialQuad *
     for (unsigned index = 0; index < 4; ++index) {
         vertices[index].x = quad->vertices[index].x;
         vertices[index].y = quad->vertices[index].y;
+        vertices[index].depth = quad->vertices[index].depth;
+        vertices[index].clip_w = cc_material_clip_w(&quad->vertices[index]);
         vertices[index].color = quad->vertices[index].color;
         memcpy(vertices[index].uv, quad->vertices[index].uv,
                sizeof(vertices[index].uv));
@@ -439,6 +487,7 @@ void cc_platform_draw_material_quad(CcPlatform *platform, const CcMaterialQuad *
 
     CcBatchState batch = {0};
     batch.kind = cc_metal_tev_supported(state, quad) ? CC_BATCH_TEV : CC_BATCH_MATERIAL;
+    batch.depth_key = (uint8_t)depth_key;
     for (unsigned index = 0; index < CC_MATERIAL_TEXTURES; ++index) {
         batch.textures[index] = cc_resolve_texture(state, quad->textures[index]);
         batch.wrap_s[index] = quad->wrap_s[index] < 3 ? quad->wrap_s[index] : 0;
@@ -604,6 +653,7 @@ static void cc_encode_batches(CcMetalState *state, id<MTLRenderCommandEncoder> e
         return;
     [encoder setVertexBuffer:state->vertex_buffers[slot] offset:0 atIndex:0];
     id<MTLRenderPipelineState> bound_pipeline = nil;
+    unsigned bound_depth = 17;
     for (size_t i = 0; i < state->batch_count; ++i) {
         const CcBatch *batch = &state->batches[i];
         MTLScissorRect batch_scissor = cc_batch_scissor(&batch->state, content);
@@ -627,6 +677,10 @@ static void cc_encode_batches(CcMetalState *state, id<MTLRenderCommandEncoder> e
         if (pipeline != bound_pipeline) {
             [encoder setRenderPipelineState:pipeline];
             bound_pipeline = pipeline;
+        }
+        if (batch->state.depth_key != bound_depth) {
+            [encoder setDepthStencilState:state->depth_states[batch->state.depth_key]];
+            bound_depth = batch->state.depth_key;
         }
         cc_bind_batch_resources(state, encoder, &batch->state);
         [encoder drawPrimitives:MTLPrimitiveTypeTriangle
@@ -691,6 +745,12 @@ void cc_platform_end(CcPlatform *platform) {
             fprintf(stderr, "Metal vertex buffer allocation failed.\n");
             return;
         }
+        id<MTLTexture> depth = cc_depth_texture(state, slot, target != nil,
+                                                drawable_width, drawable_height);
+        if (!depth) {
+            fprintf(stderr, "Metal depth target allocation failed.\n");
+            return;
+        }
 
         id<CAMetalDrawable> drawable = target ? nil : [state->layer nextDrawable];
         if (!target && !drawable) {
@@ -710,9 +770,14 @@ void cc_platform_end(CcPlatform *platform) {
             target ? MTLClearColorMake(state->clear_color.r, state->clear_color.g,
                                        state->clear_color.b, state->clear_color.a)
                    : MTLClearColorMake(0, 0, 0, 1);
+        state->render_pass.depthAttachment.texture = depth;
+        state->render_pass.depthAttachment.loadAction = MTLLoadActionClear;
+        state->render_pass.depthAttachment.storeAction = MTLStoreActionDontCare;
+        state->render_pass.depthAttachment.clearDepth = 1.0;
         id<MTLRenderCommandEncoder> encoder =
             [commands renderCommandEncoderWithDescriptor:state->render_pass];
         color.texture = nil;
+        state->render_pass.depthAttachment.texture = nil;
         if (!encoder) {
             return;
         }

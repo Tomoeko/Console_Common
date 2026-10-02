@@ -107,6 +107,8 @@ typedef struct CcMaterialVertex {
     float y;
     CcColor color;
     float uv[CC_MATERIAL_TEXTURES][2];
+    float depth;  /* Normalized window depth, from near 0 to far 1. */
+    float clip_w; /* Positive projection W; zero preserves the 2D default of 1. */
 } CcMaterialVertex;
 
 typedef struct CcMaterialQuad {
@@ -122,8 +124,12 @@ typedef struct CcMaterialQuad {
     uint8_t tev_swap_table[4];
     uint8_t alpha_compare[4];
     uint8_t blend_mode[4];
+    /* GX comparisons: NEVER, LESS, EQUAL, LEQUAL, GREATER, NEQUAL, GEQUAL,
+     * ALWAYS. Disabled depth testing also disables depth writes. */
+    uint8_t depth_mode[3]; /* Enable, comparison, write. */
     bool has_alpha_compare;
     bool has_blend_mode;
+    bool has_depth_mode;
 } CcMaterialQuad;
 
 /* Each platform backend implements this API and owns its window and GPU

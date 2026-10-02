@@ -34,7 +34,7 @@ static const char *const cc_fragment_source =
     "}\n";
 
 static const char *const cc_material_vertex_source =
-    "attribute vec2 a_position;\n"
+    "attribute vec4 a_position;\n"
     "attribute vec4 a_color;\n"
     "attribute vec2 a_uv0;\n"
     "attribute vec2 a_uv1;\n"
@@ -43,17 +43,18 @@ static const char *const cc_material_vertex_source =
     "varying CC_UV_PRECISION vec2 v_uv0;\n"
     "varying CC_UV_PRECISION vec2 v_uv1;\n"
     "void main() {\n"
-    "    gl_Position = vec4(\n"
-    "        2.0 * a_position.x / u_frame_size.x - 1.0,\n"
-    "        1.0 - 2.0 * a_position.y / u_frame_size.y,\n"
-    "        0.0, 1.0);\n"
+    "    vec2 clip = vec2(2.0 * a_position.x / u_frame_size.x - 1.0,\n"
+    "                     1.0 - 2.0 * a_position.y / u_frame_size.y);\n"
+    "    gl_Position = vec4(clip * a_position.w,\n"
+    "                       (2.0 * a_position.z - 1.0) * a_position.w,\n"
+    "                       a_position.w);\n"
     "    v_color = a_color;\n"
     "    v_uv0 = a_uv0;\n"
     "    v_uv1 = a_uv1;\n"
     "}\n";
 
 static const char *const cc_tev_vertex_source =
-    "attribute vec2 a_position;\n"
+    "attribute vec4 a_position;\n"
     "attribute vec4 a_color;\n"
     "attribute vec2 a_uv0;\n"
     "attribute vec2 a_uv1;\n"
@@ -66,10 +67,11 @@ static const char *const cc_tev_vertex_source =
     "varying CC_UV_PRECISION vec2 texUV2;\n"
     "varying CC_UV_PRECISION vec2 texUV3;\n"
     "void main() {\n"
-    "    gl_Position = vec4(\n"
-    "        2.0 * a_position.x / u_frame_size.x - 1.0,\n"
-    "        1.0 - 2.0 * a_position.y / u_frame_size.y,\n"
-    "        0.0, 1.0);\n"
+    "    vec2 clip = vec2(2.0 * a_position.x / u_frame_size.x - 1.0,\n"
+    "                     1.0 - 2.0 * a_position.y / u_frame_size.y);\n"
+    "    gl_Position = vec4(clip * a_position.w,\n"
+    "                       (2.0 * a_position.z - 1.0) * a_position.w,\n"
+    "                       a_position.w);\n"
     "    raster = a_color;\n"
     "    texUV0 = a_uv0;\n"
     "    texUV1 = a_uv1;\n"

@@ -1,4 +1,6 @@
 #include "geometry.h"
+#include "frame_damage.h"
+#include "material_depth.h"
 
 #include <assert.h>
 
@@ -79,9 +81,51 @@ static void test_quad_triangulation(void) {
     assert(triangle_area(corners, 3) == 20.0f);
 }
 
+static void test_material_depth_snapshot(void) {
+    CcMaterialQuad quad = {0};
+    unsigned key;
+    assert(cc_material_depth_key(&quad, &key) && key == 0);
+    quad.has_depth_mode = true;
+    quad.depth_mode[0] = 1;
+    quad.depth_mode[1] = 3;
+    quad.depth_mode[2] = 1;
+    quad.vertices[0].depth = 0.25f;
+    quad.vertices[0].clip_w = 2;
+    assert(cc_material_depth_key(&quad, &key) && key == 8);
+    assert(cc_material_clip_w(&quad.vertices[0]) == 2);
+    assert(cc_material_clip_w(&quad.vertices[1]) == 1);
+
+    CcFrameDamage *damage = cc_frame_damage_create();
+    assert(damage);
+    cc_frame_damage_begin(damage, 640, 480, (CcColor){0, 0, 0, 1});
+    assert(cc_frame_damage_material(damage, &quad, NULL));
+    quad.vertices[0].depth = 0.75f;
+    quad.depth_mode[2] = 0;
+    size_t count;
+    const CcFrameCommand *commands = cc_frame_damage_commands(damage, &count);
+    assert(count == 1 && commands[0].kind == CC_FRAME_COMMAND_MATERIAL);
+    const CcMaterialQuad *snapshot = &commands[0].draw.material;
+    assert(snapshot->vertices[0].depth == 0.25f);
+    assert(snapshot->vertices[0].clip_w == 2);
+    assert(snapshot->has_depth_mode && snapshot->depth_mode[2] == 1);
+    assert(cc_material_depth_key(snapshot, &key) && key == 8);
+    cc_frame_damage_destroy(damage);
+
+    quad.vertices[0].clip_w = -1;
+    assert(!cc_material_depth_key(&quad, &key));
+    quad.vertices[0].clip_w = NAN;
+    assert(!cc_material_depth_key(&quad, &key));
+    quad.vertices[0].clip_w = 1;
+    quad.depth_mode[1] = 8;
+    assert(!cc_material_depth_key(&quad, &key));
+    assert(!cc_material_depth_key(NULL, &key));
+    assert(!cc_material_depth_key(&quad, NULL));
+}
+
 int main(void) {
     test_quad_corners();
     test_signed_dimensions_and_uvs();
     test_quad_triangulation();
+    test_material_depth_snapshot();
     return 0;
 }

@@ -3,6 +3,7 @@
 #include "geometry.h"
 #include "host.h"
 #include "material_blend.h"
+#include "material_depth.h"
 #include "shaders.h"
 #include "retained_frame.h"
 
@@ -31,6 +32,8 @@ typedef struct CcVertex {
 typedef struct CcMaterialGpuVertex {
     float x;
     float y;
+    float depth;
+    float clip_w;
     float color[4];
     float uv[CC_MATERIAL_TEXTURES][2];
 } CcMaterialGpuVertex;
@@ -58,6 +61,8 @@ struct CcPlatform {
     GLuint white_texture;
     GLuint render_texture;
     GLuint render_framebuffer;
+    GLuint render_depth;
+    unsigned depth_key;
     bool rendering_target;
     CcGles2RetainedFrame retained;
     GLint projection_location;
@@ -74,6 +79,32 @@ struct CcPlatform {
     GLuint batch_texture;
     float fade_alpha;
 };
+
+static void cc_set_depth(CcPlatform *platform, unsigned key) {
+    if (platform->depth_key == key)
+        return;
+    static const GLenum comparisons[8] = {
+        GL_NEVER,   GL_LESS,     GL_EQUAL,  GL_LEQUAL,
+        GL_GREATER, GL_NOTEQUAL, GL_GEQUAL, GL_ALWAYS,
+    };
+    if (key) {
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(comparisons[(key - 1) / 2]);
+        glDepthMask((key - 1) & 1 ? GL_TRUE : GL_FALSE);
+    } else {
+        glDisable(GL_DEPTH_TEST);
+        glDepthMask(GL_FALSE);
+    }
+    platform->depth_key = key;
+}
+
+static void cc_clear_depth(CcPlatform *platform) {
+    cc_set_depth(platform, 0);
+    glDepthMask(GL_TRUE);
+    glClearDepthf(1.0f);
+    glClear(GL_DEPTH_BUFFER_BIT);
+    glDepthMask(GL_FALSE);
+}
 
 static GLuint cc_upload_texture(int width, int height, const uint8_t *rgba) {
     GLuint texture = 0;
@@ -102,6 +133,7 @@ static void cc_flush(CcPlatform *platform) {
     if (platform->quad_count == 0) {
         return;
     }
+    cc_set_depth(platform, 0);
 
     GLsizeiptr byte_count =
         (GLsizeiptr)(platform->quad_count * CC_VERTICES_PER_QUAD * sizeof(CcVertex));
@@ -210,6 +242,7 @@ static bool cc_initialize_graphics(CcPlatform *platform) {
     }
 
     glDisable(GL_DEPTH_TEST);
+    glDepthMask(GL_FALSE);
     glDisable(GL_CULL_FACE);
     glEnable(GL_BLEND);
     glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE,
@@ -257,6 +290,9 @@ void cc_platform_destroy(CcPlatform *platform) {
         }
         if (platform->render_framebuffer != 0) {
             glDeleteFramebuffers(1, &platform->render_framebuffer);
+        }
+        if (platform->render_depth != 0) {
+            glDeleteRenderbuffers(1, &platform->render_depth);
         }
         if (platform->render_texture != 0) {
             glDeleteTextures(1, &platform->render_texture);
@@ -311,6 +347,7 @@ void cc_platform_begin(CcPlatform *platform, CcColor clear_color) {
     CcViewport content = platform->presentation;
     glDisable(GL_SCISSOR_TEST);
     platform->scissor_enabled = false;
+    cc_clear_depth(platform);
     glViewport(content.x, height - content.y - content.height, content.width,
                content.height);
     if (cc_gles2_retained_begin(&platform->retained, content.width, content.height,
@@ -530,15 +567,20 @@ void cc_platform_draw_material_quad(CcPlatform *platform, const CcMaterialQuad *
     if (!platform || !quad || quad->texture_count > CC_MATERIAL_TEXTURES)
         return;
     CcMaterialBlend blend;
-    if (!cc_material_blend_resolve(quad, &blend))
+    unsigned depth_key;
+    if (!cc_material_blend_resolve(quad, &blend) ||
+        !cc_material_depth_key(quad, &depth_key))
         return;
     if (!platform->rendering_target && platform->retained.recording) {
-        if (cc_frame_damage_material(platform->retained.commands, quad,
-                                     &platform->retained.clip))
+        /* Retained color regions cannot preserve cross-region depth history.
+         * Materialize the frame before its first draw that tests depth. */
+        if (!depth_key && cc_frame_damage_material(platform->retained.commands, quad,
+                                                   &platform->retained.clip))
             return;
         cc_gles2_retained_materialize(&platform->retained, platform, cc_flush);
     }
     cc_flush(platform);
+    cc_set_depth(platform, depth_key);
 
     bool tev = cc_tev_supported(platform, quad);
     CcTevProgram *tev_program =
@@ -599,6 +641,8 @@ void cc_platform_draw_material_quad(CcPlatform *platform, const CcMaterialQuad *
         CcMaterialGpuVertex *target = &vertices[index];
         target->x = source->x;
         target->y = source->y;
+        target->depth = source->depth;
+        target->clip_w = cc_material_clip_w(source);
         target->color[0] = source->color.r;
         target->color[1] = source->color.g;
         target->color[2] = source->color.b;
@@ -619,7 +663,7 @@ void cc_platform_draw_material_quad(CcPlatform *platform, const CcMaterialQuad *
         glDisableVertexAttribArray(4);
         glDisableVertexAttribArray(5);
     }
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE,
+    glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE,
                           (GLsizei)sizeof(CcMaterialGpuVertex),
                           (const void *)offsetof(CcMaterialGpuVertex, x));
     glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE,
@@ -693,20 +737,34 @@ uint32_t cc_platform_create_render_texture(CcPlatform *platform) {
         glDeleteTextures(1, &texture);
         return 0;
     }
+    GLuint depth = 0;
+    glGenRenderbuffers(1, &depth);
+    if (!depth) {
+        glDeleteFramebuffers(1, &framebuffer);
+        glDeleteTextures(1, &texture);
+        return 0;
+    }
+    glBindRenderbuffer(GL_RENDERBUFFER, depth);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT16, CC_FRAME_WIDTH,
+                          CC_FRAME_HEIGHT);
     GLint prior = 0;
     glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prior);
     glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture,
                            0);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER,
+                              depth);
     GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
     glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)prior);
     if (status != GL_FRAMEBUFFER_COMPLETE) {
+        glDeleteRenderbuffers(1, &depth);
         glDeleteFramebuffers(1, &framebuffer);
         glDeleteTextures(1, &texture);
         return 0;
     }
     platform->render_texture = texture;
     platform->render_framebuffer = framebuffer;
+    platform->render_depth = depth;
     return (uint32_t)texture;
 }
 
@@ -726,6 +784,7 @@ bool cc_platform_begin_target(CcPlatform *platform, uint32_t texture,
     glViewport(0, 0, CC_FRAME_WIDTH, CC_FRAME_HEIGHT);
     glDisable(GL_SCISSOR_TEST);
     platform->scissor_enabled = false;
+    cc_clear_depth(platform);
     glClearColor(clear_color.r, clear_color.g, clear_color.b, clear_color.a);
     glClear(GL_COLOR_BUFFER_BIT);
     return true;
@@ -762,7 +821,9 @@ void cc_platform_destroy_texture(CcPlatform *platform, uint32_t texture) {
             platform->rendering_target = false;
         }
         glDeleteFramebuffers(1, &platform->render_framebuffer);
+        glDeleteRenderbuffers(1, &platform->render_depth);
         platform->render_framebuffer = 0;
+        platform->render_depth = 0;
         platform->render_texture = 0;
     }
     glDeleteTextures(1, &name);

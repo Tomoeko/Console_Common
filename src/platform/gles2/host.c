@@ -42,6 +42,8 @@ static bool cc_choose_config(EGLDisplay display, EGLConfig *config) {
                          8,
                          EGL_ALPHA_SIZE,
                          8,
+                         EGL_DEPTH_SIZE,
+                         16,
                          EGL_NONE};
     EGLint rgb565[] = {EGL_SURFACE_TYPE,
                        EGL_WINDOW_BIT,
@@ -55,6 +57,8 @@ static bool cc_choose_config(EGLDisplay display, EGLConfig *config) {
                        5,
                        EGL_ALPHA_SIZE,
                        0,
+                       EGL_DEPTH_SIZE,
+                       16,
                        EGL_NONE};
     EGLint *formats[] = {rgba8888, rgb565};
     for (size_t index = 0; index < sizeof(formats) / sizeof(formats[0]); index++) {
