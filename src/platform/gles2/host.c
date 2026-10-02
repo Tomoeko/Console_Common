@@ -3,6 +3,7 @@
 #include "console_common/render/viewport.h"
 
 #include <EGL/egl.h>
+#include <X11/Xatom.h>
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <X11/keysym.h>
@@ -16,6 +17,8 @@ struct CcGles2Host {
     Colormap colormap;
     Cursor hidden_cursor;
     Atom delete_window;
+    Atom window_state;
+    Atom fullscreen_state;
     int window_width;
     int window_height;
     EGLDisplay egl_display;
@@ -182,6 +185,9 @@ CcGles2Host *cc_gles2_host_create(const char *title, int width, int height) {
 
     XStoreName(host->display, host->window, title != NULL ? title : "Wii Menu");
     host->delete_window = XInternAtom(host->display, "WM_DELETE_WINDOW", False);
+    host->window_state = XInternAtom(host->display, "_NET_WM_STATE", False);
+    host->fullscreen_state =
+        XInternAtom(host->display, "_NET_WM_STATE_FULLSCREEN", False);
     XSetWMProtocols(host->display, host->window, &host->delete_window, 1);
 
     host->egl_surface = eglCreateWindowSurface(host->egl_display, config,
@@ -320,6 +326,7 @@ bool cc_gles2_host_poll(CcGles2Host *host, CcEvent *event) {
         return false;
     }
     *event = (CcEvent){.type = CC_EVENT_NONE, .key = CC_KEY_UNKNOWN};
+    bool key_repeat = false;
 
     while (XPending(host->display) > 0) {
         XEvent native_event;
@@ -359,6 +366,19 @@ bool cc_gles2_host_poll(CcGles2Host *host, CcEvent *event) {
                 return true;
             case KeyRelease:
             case KeyPress: {
+                /* Traditional X11 autorepeat emits a release/press pair. Keep
+                 * the key held so a repeating shortcut cannot toggle a window. */
+                if (native_event.type == KeyRelease && XPending(host->display) > 0) {
+                    XEvent next;
+                    XPeekEvent(host->display, &next);
+                    if (next.type == KeyPress &&
+                        next.xkey.window == native_event.xkey.window &&
+                        next.xkey.keycode == native_event.xkey.keycode &&
+                        next.xkey.time == native_event.xkey.time) {
+                        key_repeat = true;
+                        break;
+                    }
+                }
                 KeySym symbol = XLookupKeysym(&native_event.xkey, 0);
                 bool pressed = native_event.type == KeyPress;
                 if (symbol == XK_Shift_L || symbol == XK_Shift_R ||
@@ -377,6 +397,7 @@ bool cc_gles2_host_poll(CcGles2Host *host, CcEvent *event) {
                 }
                 event->type = pressed ? CC_EVENT_KEY_DOWN : CC_EVENT_KEY_UP;
                 event->key = cc_lookup_key(&native_event.xkey);
+                event->key_repeat = pressed && key_repeat;
                 event->shift_down = (native_event.xkey.state & ShiftMask) != 0;
                 event->caps_lock_on = (native_event.xkey.state & LockMask) != 0;
                 return true;
@@ -399,6 +420,49 @@ bool cc_gles2_host_poll(CcGles2Host *host, CcEvent *event) {
         }
     }
     return false;
+}
+
+bool cc_gles2_host_is_fullscreen(CcGles2Host *host) {
+    if (!host || !host->display || !host->window)
+        return false;
+    Atom type = None;
+    int format = 0;
+    unsigned long count = 0;
+    unsigned long remaining = 0;
+    unsigned char *data = NULL;
+    int result =
+        XGetWindowProperty(host->display, host->window, host->window_state, 0, 256,
+                           False, XA_ATOM, &type, &format, &count, &remaining, &data);
+    bool fullscreen = false;
+    if (result == Success && type == XA_ATOM && format == 32 && data) {
+        const Atom *states = (const Atom *)data;
+        for (unsigned long index = 0; index < count; ++index)
+            if (states[index] == host->fullscreen_state)
+                fullscreen = true;
+    }
+    if (data)
+        XFree(data);
+    return fullscreen;
+}
+
+bool cc_gles2_host_set_fullscreen(CcGles2Host *host, bool fullscreen) {
+    if (!host || !host->display || !host->window)
+        return false;
+    if (cc_gles2_host_is_fullscreen(host) == fullscreen)
+        return true;
+    XEvent request = {0};
+    request.xclient.type = ClientMessage;
+    request.xclient.window = host->window;
+    request.xclient.message_type = host->window_state;
+    request.xclient.format = 32;
+    request.xclient.data.l[0] = fullscreen ? 1 : 0;
+    request.xclient.data.l[1] = (long)host->fullscreen_state;
+    request.xclient.data.l[3] = 1; /* EWMH source: normal application. */
+    bool accepted =
+        XSendEvent(host->display, DefaultRootWindow(host->display), False,
+                   SubstructureNotifyMask | SubstructureRedirectMask, &request) != 0;
+    XFlush(host->display);
+    return accepted;
 }
 
 void cc_gles2_host_surface_size(CcGles2Host *host, int *width, int *height) {

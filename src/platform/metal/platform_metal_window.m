@@ -191,6 +191,7 @@ static void cc_enqueue_event(CcPlatform *platform, CcEvent event) {
     CcEvent event = {
         .type = type,
         .key = key,
+        .key_repeat = type == CC_EVENT_KEY_DOWN && native_event.isARepeat,
         .shift_down = (native_event.modifierFlags & NSEventModifierFlagShift) != 0,
         .caps_lock_on = (native_event.modifierFlags & NSEventModifierFlagCapsLock) != 0,
     };
@@ -229,7 +230,45 @@ static void cc_enqueue_event(CcPlatform *platform, CcEvent event) {
 
 @end
 
+static void cc_window_fullscreen_transition(CcPlatform *platform, bool active) {
+    if (platform) {
+        CcMetalState *state = (__bridge CcMetalState *)platform->metal_state;
+        if (state)
+            state->fullscreen_transitioning = active;
+    }
+}
+
 @implementation CcWindowDelegate
+
+- (void)windowWillEnterFullScreen:(NSNotification *)notification {
+    (void)notification;
+    cc_window_fullscreen_transition(self.platform, true);
+}
+
+- (void)windowWillExitFullScreen:(NSNotification *)notification {
+    (void)notification;
+    cc_window_fullscreen_transition(self.platform, true);
+}
+
+- (void)windowDidEnterFullScreen:(NSNotification *)notification {
+    (void)notification;
+    cc_window_fullscreen_transition(self.platform, false);
+}
+
+- (void)windowDidExitFullScreen:(NSNotification *)notification {
+    (void)notification;
+    cc_window_fullscreen_transition(self.platform, false);
+}
+
+- (void)windowDidFailToEnterFullScreen:(NSWindow *)window {
+    (void)window;
+    cc_window_fullscreen_transition(self.platform, false);
+}
+
+- (void)windowDidFailToExitFullScreen:(NSWindow *)window {
+    (void)window;
+    cc_window_fullscreen_transition(self.platform, false);
+}
 
 - (void)windowDidBecomeKey:(NSNotification *)notification {
     NSWindow *window = notification.object;
@@ -297,6 +336,7 @@ CcPlatform *cc_platform_create(const char *title, int window_width, int window_h
             return NULL;
         }
         [state->window setReleasedWhenClosed:NO];
+        state->window.collectionBehavior |= NSWindowCollectionBehaviorFullScreenPrimary;
         NSString *window_title = title ? [NSString stringWithUTF8String:title] : nil;
         state->window.title = window_title ? window_title : @"Wii Menu";
 
@@ -396,4 +436,24 @@ bool cc_platform_poll(CcPlatform *platform, CcEvent *event) {
         *event = platform->events[platform->event_read++];
         return true;
     }
+}
+
+bool cc_platform_is_fullscreen(CcPlatform *platform) {
+    if (!platform || ![NSThread isMainThread])
+        return false;
+    CcMetalState *state = (__bridge CcMetalState *)platform->metal_state;
+    return state && (state->window.styleMask & NSWindowStyleMaskFullScreen) != 0;
+}
+
+bool cc_platform_set_fullscreen(CcPlatform *platform, bool fullscreen) {
+    if (!platform || ![NSThread isMainThread])
+        return false;
+    CcMetalState *state = (__bridge CcMetalState *)platform->metal_state;
+    if (!state || !state->window || state->fullscreen_transitioning)
+        return false;
+    if (cc_platform_is_fullscreen(platform) == fullscreen)
+        return true;
+    state->fullscreen_transitioning = true;
+    [state->window toggleFullScreen:nil];
+    return true;
 }

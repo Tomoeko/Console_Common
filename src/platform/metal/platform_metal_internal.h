@@ -115,6 +115,7 @@ struct CcPlatform {
 @interface CcMetalState : NSObject {
   @public
     NSWindow *window;
+    bool fullscreen_transitioning;
     CcMetalView *view;
     CcWindowDelegate *window_delegate;
     CAMetalLayer *layer;

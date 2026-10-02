@@ -419,6 +419,14 @@ bool cc_platform_poll(CcPlatform *platform, CcEvent *event) {
     return platform != NULL && cc_gles2_host_poll(platform->host, event);
 }
 
+bool cc_platform_is_fullscreen(CcPlatform *platform) {
+    return platform != NULL && cc_gles2_host_is_fullscreen(platform->host);
+}
+
+bool cc_platform_set_fullscreen(CcPlatform *platform, bool fullscreen) {
+    return platform != NULL && cc_gles2_host_set_fullscreen(platform->host, fullscreen);
+}
+
 void cc_platform_begin(CcPlatform *platform, CcColor clear_color) {
     if (platform == NULL) {
         return;

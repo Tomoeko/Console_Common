@@ -62,6 +62,9 @@ typedef struct CcEvent {
      * released visually without synthesizing a character. */
     bool shift_down;
     bool caps_lock_on;
+    /* Native autorepeat is separate from a fresh physical press, including
+     * after focus changes reset a consumer's held-key state. */
+    bool key_repeat;
 } CcEvent;
 
 typedef struct CcColor {
@@ -139,6 +142,11 @@ typedef struct CcMaterialQuad {
 CcPlatform *cc_platform_create(const char *title, int window_width, int window_height);
 void cc_platform_destroy(CcPlatform *platform);
 bool cc_platform_poll(CcPlatform *platform, CcEvent *event);
+/* Window controls run on the host event thread. The setter accepts an
+ * asynchronous request; the query reports the current native window state.
+ * A headless backend cannot enter fullscreen. */
+bool cc_platform_is_fullscreen(CcPlatform *platform);
+bool cc_platform_set_fullscreen(CcPlatform *platform, bool fullscreen);
 void cc_platform_begin(CcPlatform *platform, CcColor clear_color);
 /* Clip subsequent draws to a logical framebuffer rectangle. NULL disables
  * clipping. Both backends preserve draw order across clip changes. */
