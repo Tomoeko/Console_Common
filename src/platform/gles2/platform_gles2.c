@@ -8,6 +8,7 @@
 #include "shaders.h"
 #include "retained_frame.h"
 #include "texture_dimensions.h"
+#include "../framebuffer.h"
 
 #include <GLES2/gl2.h>
 
@@ -64,6 +65,15 @@ struct CcPlatform {
     GLuint render_texture;
     GLuint render_framebuffer;
     GLuint render_depth;
+    GLuint capture_texture;
+    GLuint capture_framebuffer;
+    GLuint capture_depth;
+    uint8_t *capture_rgba;
+    uint8_t *capture_bottom_up;
+    int capture_width;
+    int capture_height;
+    size_t capture_byte_count;
+    bool capture_ready;
     unsigned depth_key;
     bool rendering_target;
     CcGles2RetainedFrame retained;
@@ -369,6 +379,7 @@ void cc_platform_destroy(CcPlatform *platform) {
     }
 
     if (cc_gles2_host_make_current(platform->host)) {
+        cc_platform_capture_end(platform);
         if (platform->white_texture != 0) {
             cc_delete_texture(platform, platform->white_texture);
         }
@@ -412,6 +423,8 @@ void cc_platform_destroy(CcPlatform *platform) {
         platform->tev_programs = next;
     }
     cc_gles2_texture_dimensions_destroy(&platform->texture_dimensions);
+    free(platform->capture_rgba);
+    free(platform->capture_bottom_up);
     free(platform);
 }
 
@@ -434,10 +447,19 @@ void cc_platform_begin(CcPlatform *platform, CcColor clear_color) {
 
     platform->quad_count = 0;
     platform->rendering_target = false;
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
     int width = 0;
     int height = 0;
-    cc_gles2_host_surface_size(platform->host, &width, &height);
+    if (platform->capture_framebuffer) {
+        width = platform->capture_width;
+        height = platform->capture_height;
+        platform->capture_ready = false;
+        platform->retained.active = false;
+        platform->retained.recording = false;
+        glBindFramebuffer(GL_FRAMEBUFFER, platform->capture_framebuffer);
+    } else {
+        cc_gles2_host_surface_size(platform->host, &width, &height);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    }
     if (platform->framebuffer_width != width || platform->framebuffer_height != height)
         cc_frame_damage_invalidate(platform->retained.commands);
     platform->framebuffer_width = width;
@@ -449,7 +471,8 @@ void cc_platform_begin(CcPlatform *platform, CcColor clear_color) {
     cc_clear_depth(platform);
     glViewport(content.x, height - content.y - content.height, content.width,
                content.height);
-    if (cc_gles2_retained_begin(&platform->retained, content.width, content.height,
+    if (!platform->capture_framebuffer &&
+        cc_gles2_retained_begin(&platform->retained, content.width, content.height,
                                 clear_color)) {
         /* Retain the content pixels in EGL's original back buffer. Clear only
          * the letterbox bars, keeping the original rasterization and precision. */
@@ -745,6 +768,49 @@ void cc_platform_draw_material_quad(CcPlatform *platform, const CcMaterialQuad *
     glDrawArrays(GL_TRIANGLES, 0, CC_VERTICES_PER_QUAD);
 }
 
+static void cc_present_capture(CcPlatform *platform) {
+    GLint alignment = 0;
+    glGetIntegerv(GL_PACK_ALIGNMENT, &alignment);
+    glPixelStorei(GL_PACK_ALIGNMENT, 4);
+    glReadPixels(0, 0, platform->capture_width, platform->capture_height, GL_RGBA,
+                 GL_UNSIGNED_BYTE, platform->capture_bottom_up);
+    glPixelStorei(GL_PACK_ALIGNMENT, alignment);
+    platform->capture_ready =
+        glGetError() == GL_NO_ERROR &&
+        cc_framebuffer_rgba(platform->capture_rgba, platform->capture_byte_count,
+                            platform->capture_bottom_up, platform->capture_width,
+                            platform->capture_height,
+                            (size_t)platform->capture_width * 4, false, true);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    int width = 0;
+    int height = 0;
+    cc_gles2_host_surface_size(platform->host, &width, &height);
+    platform->framebuffer_width = width;
+    platform->framebuffer_height = height;
+    platform->presentation = cc_viewport_fit(width, height);
+    CcViewport content = platform->presentation;
+    CcViewport source =
+        cc_viewport_fit(platform->capture_width, platform->capture_height);
+    glDisable(GL_SCISSOR_TEST);
+    platform->scissor_enabled = false;
+    cc_clear_depth(platform);
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glViewport(content.x, height - content.y - content.height, content.width,
+               content.height);
+    CcQuad image = {
+        .width = CC_FRAME_WIDTH,
+        .height = CC_FRAME_HEIGHT,
+        .u0 = (float)source.x / (float)platform->capture_width,
+        .v0 = 1 - (float)source.y / (float)platform->capture_height,
+        .u1 = (float)(source.x + source.width) / (float)platform->capture_width,
+        .v1 = 1 - (float)(source.y + source.height) / (float)platform->capture_height,
+        .color = {1, 1, 1, 1},
+        .texture = platform->capture_texture};
+    cc_platform_draw_quad(platform, &image);
+    cc_flush(platform);
+}
+
 void cc_platform_end(CcPlatform *platform) {
     if (platform == NULL) {
         return;
@@ -771,8 +837,125 @@ void cc_platform_end(CcPlatform *platform) {
         return;
     }
     cc_gles2_retained_render(&platform->retained, platform, cc_flush);
+    if (platform->capture_framebuffer)
+        cc_present_capture(platform);
     if (!cc_gles2_host_present(platform->host))
         cc_frame_damage_invalidate(platform->retained.commands);
+}
+
+bool cc_platform_capture_begin(CcPlatform *platform, CcFramebuffer *frame) {
+    if (!frame)
+        return false;
+    *frame = (CcFramebuffer){0};
+    if (!platform || platform->capture_framebuffer)
+        return false;
+    int width = 0;
+    int height = 0;
+    cc_gles2_host_surface_size(platform->host, &width, &height);
+    size_t row = 0;
+    size_t byte_count = 0;
+    if (!cc_framebuffer_storage(width, height, 1, &row, &byte_count))
+        return false;
+    GLint texture_limit = 0;
+    GLint depth_limit = 0;
+    glGetIntegerv(GL_MAX_TEXTURE_SIZE, &texture_limit);
+    glGetIntegerv(GL_MAX_RENDERBUFFER_SIZE, &depth_limit);
+    if (width > texture_limit || height > texture_limit || width > depth_limit ||
+        height > depth_limit)
+        return false;
+    cc_gles2_retained_materialize(&platform->retained, platform, cc_flush);
+    cc_flush(platform);
+    GLuint texture = cc_upload_texture_storage(width, height, NULL, GL_LINEAR);
+    GLuint framebuffer = 0;
+    GLuint depth = 0;
+    uint8_t *rgba = NULL;
+    uint8_t *bottom_up = NULL;
+    GLint prior = 0;
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prior);
+    glGenFramebuffers(1, &framebuffer);
+    glGenRenderbuffers(1, &depth);
+    bool okay = false;
+    if (!texture || !framebuffer || !depth)
+        goto release_capture;
+    glBindRenderbuffer(GL_RENDERBUFFER, depth);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT16, width, height);
+    glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture,
+                           0);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER,
+                              depth);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE ||
+        glGetError() != GL_NO_ERROR)
+        goto release_capture;
+    rgba = malloc(byte_count);
+    bottom_up = malloc(byte_count);
+    if (!rgba || !bottom_up)
+        goto release_capture;
+    platform->capture_texture = texture;
+    platform->capture_framebuffer = framebuffer;
+    platform->capture_depth = depth;
+    platform->capture_rgba = rgba;
+    platform->capture_bottom_up = bottom_up;
+    platform->capture_width = width;
+    platform->capture_height = height;
+    platform->capture_byte_count = byte_count;
+    platform->capture_ready = false;
+    cc_frame_damage_invalidate(platform->retained.commands);
+    platform->retained.active = false;
+    platform->retained.recording = false;
+    *frame = (CcFramebuffer){NULL, width, height, row};
+    okay = true;
+
+release_capture:
+    glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)prior);
+    if (!okay) {
+        if (depth)
+            glDeleteRenderbuffers(1, &depth);
+        if (framebuffer)
+            glDeleteFramebuffers(1, &framebuffer);
+        if (texture)
+            glDeleteTextures(1, &texture);
+        free(rgba);
+        free(bottom_up);
+    }
+    return okay;
+}
+
+bool cc_platform_capture_frame(CcPlatform *platform, CcFramebuffer *frame) {
+    if (!frame)
+        return false;
+    *frame = (CcFramebuffer){0};
+    if (!platform || !platform->capture_ready)
+        return false;
+    *frame =
+        (CcFramebuffer){platform->capture_rgba, platform->capture_width,
+                        platform->capture_height, (size_t)platform->capture_width * 4};
+    return true;
+}
+
+void cc_platform_capture_end(CcPlatform *platform) {
+    if (!platform)
+        return;
+    if (platform->capture_framebuffer) {
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glDeleteFramebuffers(1, &platform->capture_framebuffer);
+    }
+    if (platform->capture_depth)
+        glDeleteRenderbuffers(1, &platform->capture_depth);
+    if (platform->capture_texture)
+        glDeleteTextures(1, &platform->capture_texture);
+    free(platform->capture_rgba);
+    free(platform->capture_bottom_up);
+    platform->capture_rgba = NULL;
+    platform->capture_bottom_up = NULL;
+    platform->capture_texture = 0;
+    platform->capture_framebuffer = 0;
+    platform->capture_depth = 0;
+    platform->capture_width = 0;
+    platform->capture_height = 0;
+    platform->capture_byte_count = 0;
+    platform->capture_ready = false;
+    cc_frame_damage_invalidate(platform->retained.commands);
 }
 
 void cc_platform_set_fade_alpha(CcPlatform *platform, float alpha) {

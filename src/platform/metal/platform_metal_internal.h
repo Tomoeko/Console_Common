@@ -151,6 +151,14 @@ struct CcPlatform {
     CcClipRect clip;
     uint64_t frame_number;
     bool warned_tev_limit;
+    id<MTLTexture> capture_texture;
+    id<MTLBuffer> capture_readback;
+    uint8_t *capture_rgba;
+    size_t capture_stride;
+    size_t capture_byte_count;
+    int capture_width;
+    int capture_height;
+    bool capture_ready;
 }
 @end
 

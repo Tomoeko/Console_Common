@@ -14,6 +14,8 @@ foreach(value CC_FRAME_WIDTH CC_FRAME_HEIGHT CC_ASPECT_WIDTH CC_ASPECT_HEIGHT)
 endforeach()
 
 add_library(console_common STATIC
+    src/capture/audio_buffer.c
+    src/platform/framebuffer.c
     src/render/clip.c
     src/render/frame_damage.c
     src/render/image.c
@@ -46,6 +48,36 @@ if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
 endif()
 if(UNIX AND NOT APPLE)
     target_link_libraries(console_common PUBLIC m)
+endif()
+
+option(CC_USE_SYSTEM_VIDEO_ENCODER "Use the Apple H.264 encoder for MP4 recording"
+    ${APPLE})
+find_package(Threads REQUIRED)
+add_library(console_common_capture STATIC
+    src/capture/capture_jpeg.c
+    src/capture/capture_queue.c
+    src/capture/capture_writer.c
+    src/capture/recording.c)
+target_compile_features(console_common_capture PUBLIC c_std_11)
+set_target_properties(console_common_capture PROPERTIES C_EXTENSIONS OFF)
+target_include_directories(console_common_capture PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_link_libraries(console_common_capture PUBLIC console_common
+    PRIVATE Threads::Threads)
+if(APPLE AND CC_USE_SYSTEM_VIDEO_ENCODER)
+    target_sources(console_common_capture PRIVATE
+        src/platform/apple/capture_video_apple.c)
+    target_link_libraries(console_common_capture PRIVATE
+        "-framework VideoToolbox"
+        "-framework CoreMedia"
+        "-framework CoreVideo"
+        "-framework CoreFoundation")
+else()
+    target_sources(console_common_capture PRIVATE src/capture/capture_video_portable.c)
+endif()
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(console_common_capture PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion)
 endif()
 
 # A backend belongs to the consumer executable, allowing headless test stubs.

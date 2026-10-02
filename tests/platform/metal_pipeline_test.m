@@ -1,4 +1,5 @@
 #include "platform_metal_internal.h"
+#include "console_common/render/viewport.h"
 
 #include <assert.h>
 #include <float.h>
@@ -233,6 +234,77 @@ static void test_material_sampling(CcPlatform *platform, CcMetalState *state) {
     cc_platform_destroy_texture(platform, texture);
 }
 
+static void assert_capture_pixel(const CcFramebuffer *frame, int x, int y, uint8_t r,
+                                 uint8_t g, uint8_t b) {
+    const uint8_t *rgba = frame->rgba + (size_t)y * frame->stride + (size_t)x * 4;
+    assert(rgba[0] == r && rgba[1] == g && rgba[2] == b && rgba[3] == 255);
+}
+
+static void test_framebuffer_capture(CcPlatform *platform, CcMetalState *state) {
+    CcFramebuffer frame = {0};
+    assert(!cc_platform_capture_begin(NULL, &frame));
+    assert(!cc_platform_capture_begin(platform, NULL));
+    assert(!cc_platform_capture_frame(platform, &frame));
+    state->view = [[CcMetalView alloc] initWithFrame:NSMakeRect(0, 0, 37, 31)];
+    NSSize backing = [state->view convertSizeToBacking:state->view.bounds.size];
+    int width = (int)llround(backing.width);
+    int height = (int)llround(backing.height);
+    assert(cc_platform_capture_begin(platform, &frame));
+    assert(frame.width == width && frame.height == height &&
+           frame.stride == (size_t)width * 4);
+    assert(!frame.rgba);
+    assert(!cc_platform_capture_begin(platform, &frame));
+    assert(!cc_platform_capture_frame(platform, &frame));
+    cc_platform_begin(platform, (CcColor){0, 0, 1, 1});
+    CcQuad red = {.width = CC_FRAME_WIDTH / 2,
+                  .height = CC_FRAME_HEIGHT / 2,
+                  .color = {1, 0, 0, 1}};
+    CcQuad green = {.x = CC_FRAME_WIDTH / 2,
+                    .y = CC_FRAME_HEIGHT / 2,
+                    .width = CC_FRAME_WIDTH / 2,
+                    .height = CC_FRAME_HEIGHT / 2,
+                    .color = {0, 1, 0, 1}};
+    cc_platform_draw_quad(platform, &red);
+    cc_platform_draw_quad(platform, &green);
+    cc_platform_end(platform);
+    assert(cc_platform_capture_frame(platform, &frame));
+    CcViewport content = cc_viewport_fit(frame.width, frame.height);
+    int left = content.x + content.width / 4;
+    int right = content.x + content.width * 3 / 4;
+    int top = content.y + content.height / 4;
+    int bottom = content.y + content.height * 3 / 4;
+    assert_capture_pixel(&frame, left, top, 255, 0, 0);
+    assert_capture_pixel(&frame, right, top, 0, 0, 255);
+    assert_capture_pixel(&frame, left, bottom, 0, 0, 255);
+    assert_capture_pixel(&frame, right, bottom, 0, 255, 0);
+    assert_capture_pixel(&frame, 0, 0, 0, 0, 0);
+    const uint8_t *borrowed = frame.rgba;
+    uint32_t preview = cc_platform_create_render_texture(platform);
+    assert(preview &&
+           cc_platform_begin_target(platform, preview, (CcColor){1, 1, 1, 1}));
+    cc_platform_end(platform);
+    assert(cc_platform_capture_frame(platform, &frame) && frame.rgba == borrowed);
+    assert_capture_pixel(&frame, left, top, 255, 0, 0);
+    cc_platform_destroy_texture(platform, preview);
+    [state->view setFrameSize:NSMakeSize(73, 59)];
+    cc_platform_set_fade_alpha(platform, 1);
+    cc_platform_begin(platform, (CcColor){1, 1, 1, 1});
+    cc_platform_end(platform);
+    assert(cc_platform_capture_frame(platform, &frame));
+    assert(frame.width == width && frame.height == height && frame.rgba == borrowed);
+    assert_capture_pixel(&frame, left, top, 0, 0, 0);
+    assert_capture_pixel(&frame, right, bottom, 0, 0, 0);
+    cc_platform_capture_end(platform);
+    cc_platform_capture_end(platform);
+    assert(!cc_platform_capture_frame(platform, &frame));
+    backing = [state->view convertSizeToBacking:state->view.bounds.size];
+    assert(cc_platform_capture_begin(platform, &frame));
+    assert(frame.width == (int)llround(backing.width) &&
+           frame.height == (int)llround(backing.height) && !frame.rgba);
+    cc_platform_capture_end(platform);
+    cc_platform_set_fade_alpha(platform, 0);
+}
+
 int main(void) {
     @autoreleasepool {
         if (!MTLCreateSystemDefaultDevice()) {
@@ -246,6 +318,7 @@ int main(void) {
         test_signed_quad(&platform, state);
         test_clip_rendering(&platform, state);
         test_material_sampling(&platform, state);
+        test_framebuffer_capture(&platform, state);
         cc_wait_for_metal(state);
         cc_release_metal(state);
     }

@@ -1,6 +1,7 @@
 #include "platform_metal_internal.h"
 
 #include <math.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,6 +12,7 @@
 #include "material_depth.h"
 #include "shaders.h"
 #include "console_common/render/viewport.h"
+#include "../framebuffer.h"
 
 @implementation CcMetalState
 @end
@@ -171,6 +173,8 @@ void cc_wait_for_metal(CcMetalState *state) {
 }
 
 void cc_release_metal(CcMetalState *state) {
+    free(state->capture_rgba);
+    state->capture_rgba = NULL;
     free(state->vertices);
     free(state->batches);
 }
@@ -583,9 +587,83 @@ static void cc_encode_batches(CcMetalState *state, id<MTLRenderCommandEncoder> e
     }
 }
 
+static bool cc_encode_readback(CcMetalState *state, id<MTLCommandBuffer> commands) {
+    id<MTLBlitCommandEncoder> blit = [commands blitCommandEncoder];
+    if (!blit)
+        return false;
+    [blit copyFromTexture:state->capture_texture
+                     sourceSlice:0
+                     sourceLevel:0
+                    sourceOrigin:MTLOriginMake(0, 0, 0)
+                      sourceSize:MTLSizeMake((NSUInteger)state->capture_width,
+                                             (NSUInteger)state->capture_height, 1)
+                        toBuffer:state->capture_readback
+               destinationOffset:0
+          destinationBytesPerRow:state->capture_stride
+        destinationBytesPerImage:state->capture_readback.length];
+    [blit endEncoding];
+    return true;
+}
+
+static bool cc_encode_capture_presentation(CcMetalState *state,
+                                           id<MTLCommandBuffer> commands,
+                                           id<MTLTexture> drawable, NSUInteger slot) {
+    id<MTLTexture> depth =
+        cc_depth_texture(state, slot, true, drawable.width, drawable.height);
+    if (!depth)
+        return false;
+    MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    pass.colorAttachments[0].texture = drawable;
+    pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+    pass.depthAttachment.texture = depth;
+    pass.depthAttachment.loadAction = MTLLoadActionClear;
+    pass.depthAttachment.storeAction = MTLStoreActionDontCare;
+    pass.depthAttachment.clearDepth = 1;
+    id<MTLRenderCommandEncoder> encoder =
+        [commands renderCommandEncoderWithDescriptor:pass];
+    if (!encoder)
+        return false;
+    CcViewport fit = cc_viewport_fit((int)drawable.width, (int)drawable.height);
+    CcViewport source = cc_viewport_fit(state->capture_width, state->capture_height);
+    float u0 = (float)source.x / (float)state->capture_width;
+    float v0 = (float)source.y / (float)state->capture_height;
+    float u1 = (float)(source.x + source.width) / (float)state->capture_width;
+    float v1 = (float)(source.y + source.height) / (float)state->capture_height;
+    [encoder setViewport:(MTLViewport){fit.x, fit.y, fit.width, fit.height, 0, 1}];
+    [encoder
+        setScissorRect:(MTLScissorRect){(NSUInteger)fit.x, (NSUInteger)fit.y,
+                                        (NSUInteger)fit.width, (NSUInteger)fit.height}];
+    CcVertex vertices[CC_VERTICES_PER_QUAD];
+    const CcColor white = {1, 1, 1, 1};
+    const CcVertex corners[] = {
+        cc_vertex(0, 0, u0, v0, white),
+        cc_vertex(CC_FRAME_WIDTH, 0, u1, v0, white),
+        cc_vertex(0, CC_FRAME_HEIGHT, u0, v1, white),
+        cc_vertex(CC_FRAME_WIDTH, CC_FRAME_HEIGHT, u1, v1, white),
+    };
+    for (unsigned i = 0; i < CC_VERTICES_PER_QUAD; ++i)
+        vertices[i] = corners[cc_quad_triangle_order[i]];
+    /* A copied constant buffer leaves the scene's in-flight vertex data intact. */
+    [encoder setVertexBytes:vertices length:sizeof(vertices) atIndex:0];
+    [encoder setRenderPipelineState:state->pipeline];
+    [encoder setDepthStencilState:state->depth_states[0]];
+    [encoder setFragmentTexture:state->capture_texture atIndex:0];
+    [encoder setFragmentSamplerState:state->samplers[0][0][0] atIndex:0];
+    [encoder drawPrimitives:MTLPrimitiveTypeTriangle
+                vertexStart:0
+                vertexCount:CC_VERTICES_PER_QUAD];
+    [encoder endEncoding];
+    return true;
+}
+
 void cc_platform_end(CcPlatform *platform) {
     CcMetalState *state = cc_state(platform);
-    if (!state || (!state->render_target_handle && !state->window.isVisible)) {
+    if (state && !state->render_target_handle)
+        state->capture_ready = false;
+    if (!state || (!state->render_target_handle && !state->capture_texture &&
+                   !state->window.isVisible)) {
         return;
     }
 
@@ -613,11 +691,14 @@ void cc_platform_end(CcPlatform *platform) {
             if (entry != [NSNull null])
                 target = entry;
         }
+        bool capturing = !target && state->capture_texture != nil;
         NSSize size = [state->view convertSizeToBacking:state->view.bounds.size];
-        NSUInteger drawable_width =
-            target ? target.width : (NSUInteger)llround(size.width);
-        NSUInteger drawable_height =
-            target ? target.height : (NSUInteger)llround(size.height);
+        NSUInteger drawable_width = target      ? target.width
+                                    : capturing ? (NSUInteger)state->capture_width
+                                                : (NSUInteger)llround(size.width);
+        NSUInteger drawable_height = target      ? target.height
+                                     : capturing ? (NSUInteger)state->capture_height
+                                                 : (NSUInteger)llround(size.height);
         if (drawable_width == 0 || drawable_height == 0) {
             return;
         }
@@ -626,7 +707,8 @@ void cc_platform_end(CcPlatform *platform) {
                    : cc_viewport_fit((int)drawable_width, (int)drawable_height);
         if (!target) {
             state->layer.contentsScale = state->window.backingScaleFactor;
-            CGSize drawable_size = CGSizeMake(drawable_width, drawable_height);
+            CGSize drawable_size =
+                CGSizeMake(fmax(1.0, round(size.width)), fmax(1.0, round(size.height)));
             if (!CGSizeEqualToSize(state->layer.drawableSize, drawable_size)) {
                 state->layer.drawableSize = drawable_size;
             }
@@ -647,7 +729,7 @@ void cc_platform_end(CcPlatform *platform) {
         }
 
         id<CAMetalDrawable> drawable = target ? nil : [state->layer nextDrawable];
-        if (!target && !drawable) {
+        if (!target && !capturing && !drawable) {
             return;
         }
         id<MTLCommandBuffer> commands = [state->command_queue commandBuffer];
@@ -657,7 +739,9 @@ void cc_platform_end(CcPlatform *platform) {
 
         MTLRenderPassColorAttachmentDescriptor *color =
             state->render_pass.colorAttachments[0];
-        color.texture = target ? target : drawable.texture;
+        color.texture = target      ? target
+                        : capturing ? state->capture_texture
+                                    : drawable.texture;
         color.loadAction = MTLLoadActionClear;
         color.storeAction = MTLStoreActionStore;
         color.clearColor =
@@ -678,13 +762,101 @@ void cc_platform_end(CcPlatform *platform) {
 
         cc_encode_batches(state, encoder, content, slot);
         [encoder endEncoding];
+        bool readback_encoded = capturing && cc_encode_readback(state, commands);
+        if (capturing && drawable &&
+            !cc_encode_capture_presentation(state, commands, drawable.texture, slot))
+            drawable = nil;
         if (drawable)
             [commands presentDrawable:drawable];
         [commands commit];
         cc_release_retired_textures(state);
         state->in_flight[slot] = commands;
         state->frame_number++;
+        if (readback_encoded) {
+            [commands waitUntilCompleted];
+            state->capture_ready =
+                commands.status == MTLCommandBufferStatusCompleted &&
+                cc_framebuffer_rgba(state->capture_rgba, state->capture_byte_count,
+                                    state->capture_readback.contents,
+                                    state->capture_width, state->capture_height,
+                                    state->capture_stride, true, false);
+        }
     }
+}
+
+bool cc_platform_capture_begin(CcPlatform *platform, CcFramebuffer *frame) {
+    if (!frame)
+        return false;
+    *frame = (CcFramebuffer){0};
+    CcMetalState *state = cc_state(platform);
+    if (!state || state->capture_texture || !state->view)
+        return false;
+    NSSize size = [state->view convertSizeToBacking:state->view.bounds.size];
+    if (!isfinite(size.width) || !isfinite(size.height) || size.width < 1 ||
+        size.height < 1 || size.width > INT_MAX || size.height > INT_MAX)
+        return false;
+    int width = (int)llround(size.width);
+    int height = (int)llround(size.height);
+    size_t row = 0;
+    size_t byte_count = 0;
+    size_t aligned_row = 0;
+    size_t aligned_bytes = 0;
+    if (!cc_framebuffer_storage(width, height, 1, &row, &byte_count) ||
+        !cc_framebuffer_storage(width, height, 256, &aligned_row, &aligned_bytes))
+        return false;
+    MTLTextureDescriptor *descriptor = [MTLTextureDescriptor
+        texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                     width:(NSUInteger)width
+                                    height:(NSUInteger)height
+                                 mipmapped:NO];
+    descriptor.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+    descriptor.storageMode = MTLStorageModePrivate;
+    id<MTLTexture> texture = [state->device newTextureWithDescriptor:descriptor];
+    id<MTLBuffer> readback =
+        [state->device newBufferWithLength:aligned_bytes
+                                   options:MTLResourceStorageModeShared];
+    uint8_t *rgba = texture && readback ? malloc(byte_count) : NULL;
+    if (!rgba)
+        return false;
+    cc_wait_for_metal(state);
+    state->capture_texture = texture;
+    state->capture_readback = readback;
+    state->capture_rgba = rgba;
+    state->capture_stride = aligned_row;
+    state->capture_byte_count = byte_count;
+    state->capture_width = width;
+    state->capture_height = height;
+    state->capture_ready = false;
+    *frame = (CcFramebuffer){NULL, width, height, row};
+    return true;
+}
+
+bool cc_platform_capture_frame(CcPlatform *platform, CcFramebuffer *frame) {
+    if (!frame)
+        return false;
+    *frame = (CcFramebuffer){0};
+    CcMetalState *state = cc_state(platform);
+    if (!state || !state->capture_ready)
+        return false;
+    *frame = (CcFramebuffer){state->capture_rgba, state->capture_width,
+                             state->capture_height, (size_t)state->capture_width * 4};
+    return true;
+}
+
+void cc_platform_capture_end(CcPlatform *platform) {
+    CcMetalState *state = cc_state(platform);
+    if (!state)
+        return;
+    cc_wait_for_metal(state);
+    state->capture_texture = nil;
+    state->capture_readback = nil;
+    free(state->capture_rgba);
+    state->capture_rgba = NULL;
+    state->capture_stride = 0;
+    state->capture_byte_count = 0;
+    state->capture_width = 0;
+    state->capture_height = 0;
+    state->capture_ready = false;
 }
 
 void cc_platform_set_fade_alpha(CcPlatform *platform, float alpha) {

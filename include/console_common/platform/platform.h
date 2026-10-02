@@ -2,6 +2,7 @@
 #define CONSOLE_COMMON_PLATFORM_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 /* Coordinates use the consumer-configured logical framebuffer with origin
@@ -14,6 +15,13 @@
 #endif
 
 typedef struct CcPlatform CcPlatform;
+
+typedef struct CcFramebuffer {
+    const uint8_t *rgba;
+    int width;
+    int height;
+    size_t stride;
+} CcFramebuffer;
 
 typedef enum CcEventType {
     CC_EVENT_NONE,
@@ -163,6 +171,16 @@ void cc_platform_prepare_material(CcPlatform *platform, const CcMaterialQuad *qu
  * This is ignored for offscreen preview captures. */
 void cc_platform_set_fade_alpha(CcPlatform *platform, float alpha);
 void cc_platform_end(CcPlatform *platform);
+/* Opt-in readback owns reusable GPU and CPU storage. Capture dimensions are
+ * fixed at the initial window's backing-pixel size, including its fitted bars.
+ * begin writes dimensions with rgba == NULL. After each completed window frame,
+ * frame returns top-down RGBA8 pixels including the scene background and fader.
+ * Pixels are borrowed until the next window frame or capture_end. Offscreen
+ * preview targets never replace the captured window frame. Capture calls run
+ * on the rendering thread; ordinary rendering performs no readback. */
+bool cc_platform_capture_begin(CcPlatform *platform, CcFramebuffer *frame);
+bool cc_platform_capture_frame(CcPlatform *platform, CcFramebuffer *frame);
+void cc_platform_capture_end(CcPlatform *platform);
 uint32_t cc_platform_create_texture(CcPlatform *platform, int width, int height,
                                     const uint8_t *rgba);
 /* A reusable logical-size render target for captured scene composition. The

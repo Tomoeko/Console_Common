@@ -1,4 +1,7 @@
+get_target_property(common_root console_common SOURCE_DIR)
+
 foreach(test_name
+    platform/framebuffer
     render/clip
     render/render_geometry
     render/material
@@ -18,7 +21,8 @@ foreach(test_name
     add_executable(${target_name}-test "${test_name}_test.c")
     target_link_libraries(${target_name}-test PRIVATE console_common)
     target_include_directories(${target_name}-test PRIVATE
-        "${PROJECT_SOURCE_DIR}/src/render")
+        "${common_root}/src/render"
+        "${common_root}/src/platform")
     if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
         target_compile_options(${target_name}-test PRIVATE -UNDEBUG)
     endif()
@@ -32,7 +36,7 @@ if(APPLE)
     add_executable(cc-metal-pipeline-test platform/metal_pipeline_test.m)
     cc_add_platform(cc-metal-pipeline-test metal)
     target_include_directories(cc-metal-pipeline-test PRIVATE
-        "${PROJECT_SOURCE_DIR}/src/platform/metal")
+        "${common_root}/src/platform/metal")
     set_source_files_properties(platform/metal_pipeline_test.m
         PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
     target_compile_options(cc-metal-pipeline-test PRIVATE -UNDEBUG)
@@ -42,12 +46,40 @@ endif()
 
 # Texture metadata is independent of a graphics context and is tested on every host.
 add_executable(cc-texture-dimensions-test platform/texture_dimensions_test.c
-    "${PROJECT_SOURCE_DIR}/src/platform/gles2/texture_dimensions.c")
+    "${common_root}/src/platform/gles2/texture_dimensions.c")
 target_include_directories(cc-texture-dimensions-test PRIVATE
-    "${PROJECT_SOURCE_DIR}/src/platform/gles2")
+    "${common_root}/src/platform/gles2")
 target_compile_features(cc-texture-dimensions-test PRIVATE c_std_11)
 if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
     target_compile_options(cc-texture-dimensions-test PRIVATE
         -Wall -Wextra -Wpedantic -Wconversion -UNDEBUG)
 endif()
 add_test(NAME cc-texture-dimensions COMMAND cc-texture-dimensions-test)
+
+foreach(module writer writer_io queue jpeg recording recording_half audio_buffer)
+    string(REPLACE "_" "-" test_label "${module}")
+    set(test_target "cc-capture-${test_label}-test")
+    set(output_directory "${CMAKE_BINARY_DIR}/tests/capture-${test_label}")
+    file(MAKE_DIRECTORY "${output_directory}")
+    add_executable(${test_target} "capture/capture_${module}_test.c")
+    target_link_libraries(${test_target} PRIVATE console_common_capture)
+    target_include_directories(${test_target} PRIVATE "${common_root}/src")
+    if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(${test_target} PRIVATE
+            -Wall -Wextra -Wpedantic -Wconversion -UNDEBUG)
+    endif()
+    add_test(NAME "cc-capture-${test_label}"
+        COMMAND ${test_target} "${output_directory}")
+endforeach()
+
+if(APPLE AND CC_USE_SYSTEM_VIDEO_ENCODER)
+    add_executable(cc-capture-video-apple-test capture/capture_video_apple_test.c)
+    target_link_libraries(cc-capture-video-apple-test PRIVATE console_common_capture)
+    target_include_directories(cc-capture-video-apple-test PRIVATE "${common_root}/src")
+    if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(cc-capture-video-apple-test PRIVATE
+            -Wall -Wextra -Wpedantic -Wconversion -UNDEBUG)
+    endif()
+    add_test(NAME cc-capture-video-apple COMMAND cc-capture-video-apple-test)
+    set_tests_properties(cc-capture-video-apple PROPERTIES SKIP_RETURN_CODE 77)
+endif()
