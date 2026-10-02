@@ -375,9 +375,7 @@ bool cc_gles2_host_poll(CcGles2Host *host, CcEvent *event) {
                         event->shift_down = pressed;
                     return true;
                 }
-                if (!pressed)
-                    break;
-                event->type = CC_EVENT_KEY_DOWN;
+                event->type = pressed ? CC_EVENT_KEY_DOWN : CC_EVENT_KEY_UP;
                 event->key = cc_lookup_key(&native_event.xkey);
                 event->shift_down = (native_event.xkey.state & ShiftMask) != 0;
                 event->caps_lock_on = (native_event.xkey.state & LockMask) != 0;

@@ -147,7 +147,7 @@ static void cc_enqueue_event(CcPlatform *platform, CcEvent event) {
     [self mouseDragged:event];
 }
 
-- (void)keyDown:(NSEvent *)native_event {
+- (void)recordKey:(NSEvent *)native_event type:(CcEventType)type {
     CcKey key = CC_KEY_UNKNOWN;
     switch (native_event.keyCode) {
         case 123:
@@ -189,16 +189,25 @@ static void cc_enqueue_event(CcPlatform *platform, CcEvent event) {
     }
 
     CcEvent event = {
-        .type = CC_EVENT_KEY_DOWN,
+        .type = type,
         .key = key,
         .shift_down = (native_event.modifierFlags & NSEventModifierFlagShift) != 0,
         .caps_lock_on = (native_event.modifierFlags & NSEventModifierFlagCapsLock) != 0,
     };
-    if ((native_event.modifierFlags & NSEventModifierFlagCommand) &&
+    if (type == CC_EVENT_KEY_DOWN &&
+        (native_event.modifierFlags & NSEventModifierFlagCommand) &&
         (key == 'q' || key == 'Q')) {
         event.type = CC_EVENT_QUIT;
     }
     cc_enqueue_event(self.platform, event);
+}
+
+- (void)keyDown:(NSEvent *)native_event {
+    [self recordKey:native_event type:CC_EVENT_KEY_DOWN];
+}
+
+- (void)keyUp:(NSEvent *)native_event {
+    [self recordKey:native_event type:CC_EVENT_KEY_UP];
 }
 
 - (void)flagsChanged:(NSEvent *)native_event {
