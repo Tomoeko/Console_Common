@@ -1,5 +1,32 @@
 get_target_property(common_root console_common SOURCE_DIR)
 
+if(APPLE)
+    add_executable(cc-audio-output-apple-test audio/output_apple_test.c)
+    target_include_directories(cc-audio-output-apple-test PRIVATE
+        "${common_root}/include" "${common_root}/src")
+    target_link_libraries(cc-audio-output-apple-test PRIVATE Threads::Threads)
+    target_compile_features(cc-audio-output-apple-test PRIVATE c_std_11)
+    if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(cc-audio-output-apple-test PRIVATE
+            -Wall -Wextra -Wpedantic -Wconversion -UNDEBUG)
+    endif()
+    add_test(NAME cc-audio-output-apple COMMAND cc-audio-output-apple-test)
+endif()
+
+# The Linux route is mocked on Unix, including Apple hosts without ALSA.
+if(UNIX)
+    add_executable(cc-audio-output-linux-test audio/output_linux_test.c)
+    target_include_directories(cc-audio-output-linux-test PRIVATE
+        "${common_root}/include" "${common_root}/src")
+    target_link_libraries(cc-audio-output-linux-test PRIVATE Threads::Threads)
+    target_compile_features(cc-audio-output-linux-test PRIVATE c_std_11)
+    if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(cc-audio-output-linux-test PRIVATE
+            -Wall -Wextra -Wpedantic -Wconversion -UNDEBUG)
+    endif()
+    add_test(NAME cc-audio-output-linux COMMAND cc-audio-output-linux-test)
+endif()
+
 foreach(test_name
     platform/framebuffer
     render/clip
