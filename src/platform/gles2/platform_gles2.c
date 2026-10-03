@@ -3,6 +3,7 @@
 #include "clip.h"
 #include "geometry.h"
 #include "host.h"
+#include "indexed_gles2.h"
 #include "material_blend.h"
 #include "material_depth.h"
 #include "shaders.h"
@@ -13,8 +14,8 @@
 #include <GLES2/gl2.h>
 
 #include <stddef.h>
-#include <math.h>
 #include <limits.h>
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -106,6 +107,20 @@ struct CcPlatform {
     GLuint batch_texture;
     float fade_alpha;
 };
+
+CcGles2Host *cc_gles2_platform_host(CcPlatform *platform) {
+    return platform ? platform->host : NULL;
+}
+
+void cc_gles2_platform_invalidate_graphics(CcPlatform *platform) {
+    if (!platform)
+        return;
+    platform->depth_key = UINT_MAX;
+    cc_frame_damage_invalidate(platform->retained.commands);
+    glDisable(GL_CULL_FACE);
+    glBlendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+}
 
 static void cc_release_antialiasing(CcPlatform *platform) {
     if (platform->antialias_depth)
