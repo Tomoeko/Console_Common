@@ -3,7 +3,8 @@
 #import <Foundation/Foundation.h>
 
 /* Source is compiled once at startup. The C renderer supplies ordered quads;
- * Metal only handles their rasterization and presentation. */
+ * Metal only handles their rasterization and presentation. Sample interpolation
+ * shades original texture and TEV values at every enabled coverage sample. */
 NSString *cc_metal_shader_source(void) {
     return [NSString
         stringWithFormat:
@@ -21,11 +22,11 @@ NSString *cc_metal_shader_source(void) {
              "\n"
              "struct CcVertexOutput {\n"
              "    float4 position [[position]];\n"
-             "    float2 uv0;\n"
-             "    float2 uv1;\n"
-             "    float2 uv2;\n"
-             "    float2 uv3;\n"
-             "    float4 color;\n"
+             "    float2 uv0 [[sample_perspective]];\n"
+             "    float2 uv1 [[sample_perspective]];\n"
+             "    float2 uv2 [[sample_perspective]];\n"
+             "    float2 uv3 [[sample_perspective]];\n"
+             "    float4 color [[sample_perspective]];\n"
              "};\n"
              "\n"
              "struct CcMaterialParams {\n"

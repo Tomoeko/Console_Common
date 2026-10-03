@@ -137,7 +137,8 @@ static bool valid_options(const CcRecordingOptions *options) {
     if (!options || !options->platform ||
         (options->video_rate != 50 && options->video_rate != 60) ||
         options->sample_rate < 8000 || options->sample_rate > 65535 ||
-        !valid_prefix(options->filename_prefix))
+        !valid_prefix(options->filename_prefix) ||
+        !cc_capture_audio_mode_supported(options->audio_mode))
         return false;
     bool audible = options->audio.begin != NULL;
     if (audible)
@@ -187,9 +188,9 @@ CcRecording *cc_recording_open_path(const CcRecordingOptions *options,
         goto release_recording;
     if (audible && !recording->audio.begin(recording->audio.context, audio_rate * 2))
         goto release_recording;
-    recording->writer = cc_capture_queue_open(path, (unsigned)recording->width,
-                                              (unsigned)recording->height,
-                                              RECORDING_TIMESCALE, audio_rate);
+    recording->writer = cc_capture_queue_open_with_audio(
+        path, (unsigned)recording->width, (unsigned)recording->height,
+        RECORDING_TIMESCALE, audio_rate, options->audio_mode);
     if (!recording->writer) {
         if (audible)
             recording->audio.end(recording->audio.context);

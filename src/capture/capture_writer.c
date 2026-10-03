@@ -5,9 +5,11 @@
 
 #include "console_common/capture/capture_writer.h"
 #include "capture_video.h"
+#include "capture_audio.h"
 
 #include <float.h>
 #include <limits.h>
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -43,13 +45,17 @@ typedef struct {
 struct CcCaptureWriter {
     FILE *file;
     CcCaptureVideo *encoder;
+    CcCaptureAudio *audio_encoder;
+    CcCaptureAudioConfig audio_config;
     CaptureTrack video;
     CaptureTrack audio;
     uint64_t position;
     uint64_t complete_position;
     uint64_t mdat_position;
     uint32_t video_timescale;
+    uint32_t movie_timescale;
     uint32_t audio_rate;
+    uint64_t audio_input_frames;
     unsigned width;
     unsigned height;
     const char *error;
@@ -197,34 +203,73 @@ static void write_file_header(CcCaptureWriter *writer) {
     writer->complete_position = writer->position;
 }
 
-static bool movie_duration(uint64_t ticks, uint32_t timescale, uint64_t *duration) {
+static bool movie_duration(uint64_t ticks, uint32_t timescale, uint32_t movie_timescale,
+                           uint64_t *duration) {
     uint64_t seconds = ticks / timescale;
     uint64_t remainder = ticks % timescale;
-    uint64_t tail = (remainder * CAPTURE_MOVIE_TIMESCALE + timescale - 1) / timescale;
-    if (seconds > (UINT64_MAX - tail) / CAPTURE_MOVIE_TIMESCALE)
+    uint64_t tail = (remainder * movie_timescale + timescale - 1) / timescale;
+    if (seconds > (UINT64_MAX - tail) / movie_timescale)
         return false;
-    *duration = seconds * CAPTURE_MOVIE_TIMESCALE + tail;
+    *duration = seconds * movie_timescale + tail;
     return true;
 }
 
-CcCaptureWriter *cc_capture_writer_open(const char *path, unsigned width,
-                                        unsigned height, uint32_t video_timescale,
-                                        uint32_t audio_rate) {
+static uint32_t audio_movie_timescale(uint32_t sample_rate) {
+    /* Retain microsecond video timing and exact audio-frame edit boundaries. */
+    uint32_t first = CAPTURE_MOVIE_TIMESCALE;
+    uint32_t second = sample_rate;
+    while (second) {
+        uint32_t remainder = first % second;
+        first = second;
+        second = remainder;
+    }
+    uint64_t multiple = (uint64_t)CAPTURE_MOVIE_TIMESCALE / first * sample_rate;
+    return multiple <= UINT32_MAX ? (uint32_t)multiple : 0;
+}
+
+bool cc_capture_audio_mode_supported(CcCaptureAudioMode mode) {
+    return mode == CC_CAPTURE_AUDIO_NORMAL ||
+           (mode == CC_CAPTURE_AUDIO_WEB && cc_capture_audio_available() &&
+            cc_capture_video_web_available());
+}
+
+CcCaptureWriter *cc_capture_writer_open_with_audio(const char *path, unsigned width,
+                                                   unsigned height,
+                                                   uint32_t video_timescale,
+                                                   uint32_t audio_rate,
+                                                   CcCaptureAudioMode audio_mode) {
     if (!path || !path[0] || !width || !height || width > 4096 || height > 4096 ||
         !video_timescale || video_timescale > INT32_MAX || !audio_rate ||
         audio_rate > 65535 || sizeof(float) != 4 || FLT_RADIX != 2 ||
-        FLT_MANT_DIG != 24 || FLT_MAX_EXP != 128)
+        FLT_MANT_DIG != 24 || FLT_MAX_EXP != 128 ||
+        !cc_capture_audio_mode_supported(audio_mode))
         return NULL;
     CcCaptureWriter *writer = calloc(1, sizeof(*writer));
     if (!writer)
         return NULL;
     writer->video_timescale = video_timescale;
+    writer->movie_timescale = CAPTURE_MOVIE_TIMESCALE;
     writer->audio_rate = audio_rate;
     writer->width = width;
     writer->height = height;
+    if (audio_mode == CC_CAPTURE_AUDIO_WEB) {
+        writer->movie_timescale = audio_movie_timescale(audio_rate);
+        if (!writer->movie_timescale)
+            goto release_writer;
+        writer->audio_encoder = cc_capture_audio_open(audio_rate);
+        if (!writer->audio_encoder ||
+            !cc_capture_audio_config(writer->audio_encoder, &writer->audio_config))
+            goto release_writer;
+    }
     writer->encoder = cc_capture_video_open(width, height, video_timescale);
     if (!writer->encoder)
         goto release_writer;
+    if (audio_mode == CC_CAPTURE_AUDIO_WEB) {
+        CcCaptureVideoConfig video_config;
+        if (!cc_capture_video_config(writer->encoder, &video_config) ||
+            video_config.codec != CC_CAPTURE_VIDEO_H264)
+            goto release_writer;
+    }
     writer->file = fopen(path, "wbx");
     if (!writer->file)
         goto release_writer;
@@ -237,8 +282,16 @@ release_writer:
     if (writer->file)
         fclose(writer->file);
     cc_capture_video_close(writer->encoder);
+    cc_capture_audio_close(writer->audio_encoder);
     free(writer);
     return NULL;
+}
+
+CcCaptureWriter *cc_capture_writer_open(const char *path, unsigned width,
+                                        unsigned height, uint32_t video_timescale,
+                                        uint32_t audio_rate) {
+    return cc_capture_writer_open_with_audio(path, width, height, video_timescale,
+                                             audio_rate, CC_CAPTURE_AUDIO_NORMAL);
 }
 
 bool cc_capture_writer_video(CcCaptureWriter *writer, const uint8_t *rgba,
@@ -249,7 +302,7 @@ bool cc_capture_writer_video(CcCaptureWriter *writer, const uint8_t *rgba,
         return fail_writer(writer, "Invalid recording frame duration.");
     uint64_t movie_ticks;
     if (!movie_duration(writer->video.duration + duration_ticks,
-                        writer->video_timescale, &movie_ticks))
+                        writer->video_timescale, writer->movie_timescale, &movie_ticks))
         return fail_writer(writer, "Recording duration exceeds file format limits.");
     const uint8_t *sample = NULL;
     size_t size = 0;
@@ -296,6 +349,21 @@ static void write_audio_words(CcCaptureWriter *writer, const float *stereo,
     }
 }
 
+static bool append_audio_packet(void *context, const uint8_t *bytes, size_t size,
+                                uint32_t duration) {
+    CcCaptureWriter *writer = context;
+    if (!bytes || !size || size > UINT32_MAX || !duration ||
+        writer->audio.duration > UINT64_MAX - duration ||
+        !reserve_sample(writer, &writer->audio))
+        return fail_writer(writer, "Invalid encoded recording audio packet.");
+    uint64_t offset = writer->position;
+    write_bytes(writer, bytes, size);
+    if (writer->io_failed)
+        return false;
+    commit_sample(writer, &writer->audio, offset, (uint32_t)size, duration, true);
+    return true;
+}
+
 bool cc_capture_writer_audio(CcCaptureWriter *writer, const float *stereo,
                              size_t frame_count) {
     if (!writer || writer->error)
@@ -304,8 +372,17 @@ bool cc_capture_writer_audio(CcCaptureWriter *writer, const float *stereo,
         return true;
     if (!stereo || frame_count > UINT32_MAX / CAPTURE_AUDIO_FRAME_BYTES ||
         frame_count > SIZE_MAX / CAPTURE_AUDIO_FRAME_BYTES ||
-        frame_count > UINT32_MAX - writer->audio.duration)
+        (!writer->audio_encoder && frame_count > UINT32_MAX - writer->audio.duration))
         return fail_writer(writer, "Invalid recording audio frame count.");
+    if (writer->audio_encoder) {
+        if (frame_count > UINT64_MAX - writer->audio_input_frames)
+            return fail_writer(writer, "Recording audio duration overflow.");
+        if (!cc_capture_audio_append(writer->audio_encoder, stereo, frame_count,
+                                     append_audio_packet, writer))
+            return fail_writer(writer, cc_capture_audio_error(writer->audio_encoder));
+        writer->audio_input_frames += frame_count;
+        return true;
+    }
     if (!reserve_sample(writer, &writer->audio))
         return false;
     uint64_t offset = writer->position;
@@ -332,7 +409,7 @@ static void write_movie_header(CcCaptureWriter *writer, uint64_t duration) {
     uint64_t box = begin_full_box(writer, "mvhd", 0x1000000);
     write_u64(writer, 0);
     write_u64(writer, 0);
-    write_u32(writer, CAPTURE_MOVIE_TIMESCALE);
+    write_u32(writer, writer->movie_timescale);
     write_u64(writer, duration);
     write_u32(writer, 0x10000);
     write_u16(writer, 0x100);
@@ -485,6 +562,38 @@ static void write_video_description(CcCaptureWriter *writer) {
 }
 
 static void write_audio_description(CcCaptureWriter *writer) {
+    if (writer->audio_encoder) {
+        uint64_t entry = begin_box(writer, "mp4a");
+        write_zeros(writer, 6);
+        write_u16(writer, 1);
+        write_zeros(writer, 8);
+        write_u16(writer, 2);
+        write_u16(writer, 16);
+        write_zeros(writer, 4);
+        write_u32(writer, writer->audio_rate << 16);
+        uint64_t config = begin_full_box(writer, "esds", 0);
+        write_u8(writer, 3); /* ES_Descriptor, decoder configuration and SL timing. */
+        write_u8(writer, 25);
+        write_u16(writer, 2);
+        write_u8(writer, 0);
+        write_u8(writer, 4);
+        write_u8(writer, 17);
+        write_u8(writer, 0x40); /* MPEG-4 Audio. */
+        write_u8(writer, 0x15); /* AudioStream, reserved bit set. */
+        write_zeros(writer, 3);
+        write_u32(writer, writer->audio_config.bitrate);
+        write_u32(writer, writer->audio_config.bitrate);
+        write_u8(writer, 5);
+        write_u8(writer, sizeof(writer->audio_config.decoder_config));
+        write_bytes(writer, writer->audio_config.decoder_config,
+                    sizeof(writer->audio_config.decoder_config));
+        write_u8(writer, 6);
+        write_u8(writer, 1);
+        write_u8(writer, 2);
+        end_box(writer, config);
+        end_box(writer, entry);
+        return;
+    }
     /* ISO/IEC 23003-5:2020: one MP4 sample is one interleaved PCM frame. */
     uint64_t entry = begin_box(writer, "fpcm");
     write_zeros(writer, 6);
@@ -528,7 +637,7 @@ static uint32_t duration_runs(const CaptureTrack *track) {
 static void write_time_to_sample(CcCaptureWriter *writer, bool video) {
     const CaptureTrack *track = video ? &writer->video : &writer->audio;
     uint64_t box = begin_full_box(writer, "stts", 0);
-    if (!video) {
+    if (!video && !writer->audio_encoder) {
         write_u32(writer, track->duration ? 1 : 0);
         if (track->duration) {
             write_u32(writer, (uint32_t)track->duration);
@@ -553,15 +662,16 @@ static void write_time_to_sample(CcCaptureWriter *writer, bool video) {
 static void write_sample_to_chunk(CcCaptureWriter *writer, bool video) {
     const CaptureTrack *track = video ? &writer->video : &writer->audio;
     uint64_t box = begin_full_box(writer, "stsc", 0);
-    write_u32(writer, video ? (track->count ? 1 : 0) : duration_runs(track));
+    bool access_units = video || writer->audio_encoder;
+    write_u32(writer, access_units ? (track->count ? 1 : 0) : duration_runs(track));
     for (size_t i = 0; i < track->count; ++i) {
-        if (video && i > 0)
+        if (access_units && i > 0)
             break;
-        if (!video && i > 0 &&
+        if (!access_units && i > 0 &&
             track->samples[i].duration == track->samples[i - 1].duration)
             continue;
         write_u32(writer, (uint32_t)i + 1);
-        write_u32(writer, video ? 1 : track->samples[i].duration);
+        write_u32(writer, access_units ? 1 : track->samples[i].duration);
         write_u32(writer, 1);
     }
     end_box(writer, box);
@@ -570,9 +680,11 @@ static void write_sample_to_chunk(CcCaptureWriter *writer, bool video) {
 static void write_sample_sizes(CcCaptureWriter *writer, bool video) {
     const CaptureTrack *track = video ? &writer->video : &writer->audio;
     uint64_t box = begin_full_box(writer, "stsz", 0);
-    write_u32(writer, video ? 0 : CAPTURE_AUDIO_FRAME_BYTES);
-    write_u32(writer, video ? (uint32_t)track->count : (uint32_t)track->duration);
-    if (video) {
+    bool access_units = video || writer->audio_encoder;
+    write_u32(writer, access_units ? 0 : CAPTURE_AUDIO_FRAME_BYTES);
+    write_u32(writer,
+              access_units ? (uint32_t)track->count : (uint32_t)track->duration);
+    if (access_units) {
         for (size_t i = 0; i < track->count; ++i)
             write_u32(writer, track->samples[i].size);
     }
@@ -604,9 +716,31 @@ static void write_sync_samples(CcCaptureWriter *writer) {
     end_box(writer, box);
 }
 
+static void write_audio_roll_groups(CcCaptureWriter *writer) {
+    if (!writer->audio_encoder || !writer->audio.count)
+        return;
+    /* AAC-LC needs the previous access unit for overlap reconstruction.
+     * Explicit roll groups distinguish decoder pre-roll from presentation
+     * priming, preventing players from discarding the initial delay twice. */
+    uint64_t description = begin_full_box(writer, "sgpd", 0x1000000);
+    write_bytes(writer, "roll", 4);
+    write_u32(writer, 2);
+    write_u32(writer, 1);
+    write_u16(writer, UINT16_MAX); /* Signed roll_distance = -1 access unit. */
+    end_box(writer, description);
+    uint64_t mapping = begin_full_box(writer, "sbgp", 0);
+    write_bytes(writer, "roll", 4);
+    write_u32(writer, 1);
+    write_u32(writer, (uint32_t)writer->audio.count);
+    write_u32(writer, 1);
+    end_box(writer, mapping);
+}
+
 static void write_sample_table(CcCaptureWriter *writer, bool video) {
     uint64_t box = begin_box(writer, "stbl");
     write_sample_description(writer, video);
+    if (!video)
+        write_audio_roll_groups(writer);
     write_time_to_sample(writer, video);
     write_sample_to_chunk(writer, video);
     write_sample_sizes(writer, video);
@@ -629,6 +763,19 @@ static void write_media_information(CcCaptureWriter *writer, bool video) {
 static void write_track(CcCaptureWriter *writer, bool video, uint64_t duration) {
     uint64_t track = begin_box(writer, "trak");
     write_track_header(writer, video, duration);
+    if (!video && writer->audio_encoder) {
+        /* Skip the codec's reported priming frames and expose only real input.
+         * Media samples retain complete 1024-frame AAC units for decoding. */
+        uint64_t edit = begin_box(writer, "edts");
+        uint64_t list = begin_full_box(writer, "elst", 0x1000000);
+        write_u32(writer, 1);
+        write_u64(writer, duration);
+        write_u64(writer, writer->audio_config.priming_frames);
+        write_u16(writer, 1);
+        write_u16(writer, 0);
+        end_box(writer, list);
+        end_box(writer, edit);
+    }
     uint64_t media = begin_box(writer, "mdia");
     write_media_header(writer, video);
     write_media_information(writer, video);
@@ -636,12 +783,71 @@ static void write_track(CcCaptureWriter *writer, bool video, uint64_t duration) 
     end_box(writer, track);
 }
 
+static uint64_t audio_presented_frames(const CcCaptureWriter *writer) {
+    if (!writer->audio_encoder)
+        return writer->audio.duration;
+    uint64_t available =
+        writer->audio.duration > writer->audio_config.priming_frames
+            ? writer->audio.duration - writer->audio_config.priming_frames
+            : 0;
+    return writer->audio_input_frames < available ? writer->audio_input_frames
+                                                  : available;
+}
+
+static void write_audio_gapless_metadata(CcCaptureWriter *writer) {
+    if (!writer->audio_encoder || !writer->audio.count)
+        return;
+    uint64_t frames = audio_presented_frames(writer);
+    uint64_t coded = writer->audio.duration;
+    uint32_t priming = writer->audio_config.priming_frames;
+    uint32_t padding =
+        coded >= frames + priming ? (uint32_t)(coded - frames - priming) : 0;
+    char timing[128];
+    int length = snprintf(timing, sizeof(timing),
+                          " 00000000 %08" PRIX32 " %08" PRIX32 " %016" PRIX64
+                          " 00000000 00000000 00000000 00000000"
+                          " 00000000 00000000 00000000 00000000",
+                          priming, padding, frames);
+    if (length < 0 || (size_t)length >= sizeof(timing)) {
+        writer->io_failed = true;
+        fail_writer(writer, "Cannot describe AAC padding.");
+        return;
+    }
+    /* Audio-file readers also need this standard gapless field because some
+     * ignore presentation edit lists. It contains only sample counts. */
+    uint64_t user_data = begin_box(writer, "udta");
+    uint64_t metadata = begin_full_box(writer, "meta", 0);
+    uint64_t handler = begin_full_box(writer, "hdlr", 0);
+    write_u32(writer, 0);
+    write_bytes(writer, "mdirappl", 8);
+    write_zeros(writer, 10);
+    end_box(writer, handler);
+    uint64_t list = begin_box(writer, "ilst");
+    uint64_t field = begin_box(writer, "----");
+    uint64_t owner = begin_full_box(writer, "mean", 0);
+    write_bytes(writer, "com.apple.iTunes", 16);
+    end_box(writer, owner);
+    uint64_t name = begin_full_box(writer, "name", 0);
+    write_bytes(writer, "iTunSMPB", 8);
+    end_box(writer, name);
+    uint64_t data = begin_full_box(writer, "data", 1);
+    write_u32(writer, 0);
+    write_bytes(writer, timing, (size_t)length);
+    end_box(writer, data);
+    end_box(writer, field);
+    end_box(writer, list);
+    end_box(writer, metadata);
+    end_box(writer, user_data);
+}
+
 static bool finalize_recording(CcCaptureWriter *writer) {
     uint64_t video_duration;
     uint64_t audio_duration;
+    uint64_t audio_frames = audio_presented_frames(writer);
     if (!movie_duration(writer->video.duration, writer->video_timescale,
-                        &video_duration) ||
-        !movie_duration(writer->audio.duration, writer->audio_rate, &audio_duration))
+                        writer->movie_timescale, &video_duration) ||
+        !movie_duration(audio_frames, writer->audio_rate, writer->movie_timescale,
+                        &audio_duration))
         return fail_writer(writer, "Recording duration exceeds file format limits.");
 
     clearerr(writer->file);
@@ -655,6 +861,7 @@ static bool finalize_recording(CcCaptureWriter *writer) {
     if (writer->video.count)
         write_track(writer, true, video_duration);
     write_track(writer, false, audio_duration);
+    write_audio_gapless_metadata(writer);
     end_box(writer, movie);
     if (writer->io_failed)
         return false;
@@ -672,13 +879,27 @@ static bool finalize_recording(CcCaptureWriter *writer) {
 bool cc_capture_writer_close(CcCaptureWriter *writer) {
     if (!writer)
         return true;
-    bool okay = finalize_recording(writer);
+    bool audio_complete =
+        !writer->audio_encoder ||
+        cc_capture_audio_finish(writer->audio_encoder, append_audio_packet, writer);
+    if (audio_complete && writer->audio_encoder) {
+        audio_complete =
+            cc_capture_audio_config(writer->audio_encoder, &writer->audio_config);
+        if (audio_complete &&
+            audio_presented_frames(writer) != writer->audio_input_frames)
+            audio_complete =
+                fail_writer(writer, "AAC encoder omitted recording samples.");
+    }
+    if (!audio_complete)
+        fail_writer(writer, cc_capture_audio_error(writer->audio_encoder));
+    bool okay = finalize_recording(writer) && audio_complete;
     if (fclose(writer->file) != 0)
         okay = false;
     okay = okay && !writer->error;
     free(writer->video.samples);
     free(writer->audio.samples);
     cc_capture_video_close(writer->encoder);
+    cc_capture_audio_close(writer->audio_encoder);
     free(writer);
     return okay;
 }

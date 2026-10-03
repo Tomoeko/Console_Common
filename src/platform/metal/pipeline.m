@@ -2,8 +2,10 @@
 
 #include <stdio.h>
 
-static id<MTLRenderPipelineState>
-cc_make_pipeline(CcMetalState *state, id<MTLFunction> fragment, uint8_t blend_key) {
+static id<MTLRenderPipelineState> cc_make_pipeline(CcMetalState *state,
+                                                   id<MTLFunction> fragment,
+                                                   uint8_t blend_key,
+                                                   NSUInteger samples) {
     static const MTLBlendFactor factors[8] = {
         MTLBlendFactorZero,
         MTLBlendFactorOne,
@@ -16,6 +18,7 @@ cc_make_pipeline(CcMetalState *state, id<MTLFunction> fragment, uint8_t blend_ke
     };
 
     MTLRenderPipelineDescriptor *description = [MTLRenderPipelineDescriptor new];
+    description.rasterSampleCount = samples;
     description.vertexFunction = state->vertex_function;
     description.fragmentFunction = fragment;
     description.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
@@ -49,17 +52,25 @@ cc_metal_material_pipeline(CcMetalState *state, CcBatchKind kind, uint8_t blend_
         return nil;
     }
     unsigned material_kind = (unsigned)kind - 1;
-    if (!state->material_pipeline_attempted[material_kind][blend_key]) {
+    bool *attempted = state->rendering_multisample
+                          ? state->antialias_pipeline_attempted[material_kind]
+                          : state->material_pipeline_attempted[material_kind];
+    __strong id<MTLRenderPipelineState> *pipelines =
+        state->rendering_multisample
+            ? state->antialias_material_pipelines[material_kind]
+            : state->material_pipelines[material_kind];
+    if (!attempted[blend_key]) {
         /* Retain failures too, so an unavailable pipeline cannot repeatedly
          * compile and report errors in the frame loop. */
-        state->material_pipeline_attempted[material_kind][blend_key] = true;
+        attempted[blend_key] = true;
         id<MTLFunction> fragment = kind == CC_BATCH_TEV
                                        ? state->tev_fragment_function
                                        : state->material_fragment_function;
-        state->material_pipelines[material_kind][blend_key] =
-            cc_make_pipeline(state, fragment, blend_key);
+        pipelines[blend_key] = cc_make_pipeline(
+            state, fragment, blend_key,
+            state->rendering_multisample ? state->antialias_samples : 1);
     }
-    return state->material_pipelines[material_kind][blend_key];
+    return pipelines[blend_key];
 }
 
 static bool cc_prepare_depth_states(CcMetalState *state) {
@@ -84,12 +95,39 @@ static bool cc_prepare_depth_states(CcMetalState *state) {
 }
 
 bool cc_metal_prepare_pipelines(CcMetalState *state, id<MTLFunction> basic_fragment) {
-    state->pipeline = cc_make_pipeline(state, basic_fragment, CC_BLEND_DEFAULT);
-    if (!state->pipeline || !cc_prepare_depth_states(state)) {
+    state->basic_fragment_function = basic_fragment;
+    state->pipeline = cc_make_pipeline(state, basic_fragment, CC_BLEND_DEFAULT, 1);
+    state->presentation_pipeline =
+        cc_make_pipeline(state, basic_fragment, CC_BLEND_DISABLED, 1);
+    if (!state->pipeline || !state->presentation_pipeline ||
+        !cc_prepare_depth_states(state)) {
         return false;
     }
     return cc_metal_material_pipeline(state, CC_BATCH_MATERIAL, CC_BLEND_DEFAULT) &&
            cc_metal_material_pipeline(state, CC_BATCH_MATERIAL, CC_BLEND_DISABLED) &&
            cc_metal_material_pipeline(state, CC_BATCH_TEV, CC_BLEND_DEFAULT) &&
            cc_metal_material_pipeline(state, CC_BATCH_TEV, CC_BLEND_DISABLED);
+}
+
+bool cc_metal_prepare_antialias_pipelines(CcMetalState *state) {
+    if (!state->antialias_pipeline) {
+        state->antialias_pipeline =
+            cc_make_pipeline(state, state->basic_fragment_function, CC_BLEND_DEFAULT,
+                             state->antialias_samples);
+    }
+    if (!state->antialias_pipeline)
+        return false;
+    bool previous = state->rendering_multisample;
+    state->rendering_multisample = true;
+    bool okay = true;
+    for (unsigned kind = 0; kind < 2; ++kind) {
+        for (unsigned blend = 0; blend < CC_MATERIAL_PIPELINE_VARIANTS; ++blend) {
+            if (state->material_pipelines[kind][blend] &&
+                !cc_metal_material_pipeline(state, (CcBatchKind)(kind + 1),
+                                            (uint8_t)blend))
+                okay = false;
+        }
+    }
+    state->rendering_multisample = previous;
+    return okay;
 }

@@ -5,6 +5,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "console_common/capture/capture_writer.h"
+
 typedef struct CcCaptureQueue CcCaptureQueue;
 
 /* One owner serializes these calls. A worker exclusively appends to the file.
@@ -13,6 +15,11 @@ typedef struct CcCaptureQueue CcCaptureQueue;
  * These calls must never run from the audio callback. */
 CcCaptureQueue *cc_capture_queue_open(const char *path, unsigned width, unsigned height,
                                       uint32_t video_timescale, uint32_t audio_rate);
+CcCaptureQueue *cc_capture_queue_open_with_audio(const char *path, unsigned width,
+                                                 unsigned height,
+                                                 uint32_t video_timescale,
+                                                 uint32_t audio_rate,
+                                                 CcCaptureAudioMode audio_mode);
 bool cc_capture_queue_video(CcCaptureQueue *queue, const uint8_t *rgba,
                             size_t row_stride, uint32_t duration_ticks);
 bool cc_capture_queue_audio(CcCaptureQueue *queue, const float *stereo,

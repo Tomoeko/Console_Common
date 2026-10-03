@@ -94,6 +94,67 @@ static id<MTLTexture> cc_depth_texture(CcMetalState *state, NSUInteger slot,
     return texture;
 }
 
+static bool cc_antialias_targets(CcMetalState *state, NSUInteger slot, NSUInteger width,
+                                 NSUInteger height) {
+    id<MTLTexture> color = state->antialias_color[slot];
+    id<MTLTexture> depth = state->antialias_depth[slot];
+    if (color && depth && color.width == width && color.height == height)
+        return true;
+    if (state->antialias_failed_width[slot] == width &&
+        state->antialias_failed_height[slot] == height)
+        return false;
+    state->antialias_failed_width[slot] = width;
+    state->antialias_failed_height[slot] = height;
+    MTLTextureDescriptor *descriptor = [MTLTextureDescriptor new];
+    descriptor.textureType = MTLTextureType2DMultisample;
+    descriptor.width = width;
+    descriptor.height = height;
+    descriptor.sampleCount = state->antialias_samples;
+    descriptor.pixelFormat = MTLPixelFormatBGRA8Unorm;
+    descriptor.usage = MTLTextureUsageRenderTarget;
+    descriptor.storageMode = MTLStorageModePrivate;
+    /* Tile GPUs can resolve coverage without storing the multisample surfaces
+     * in main memory. Other Metal devices retain the private-storage path. */
+    if (@available(macOS 11.0, *)) {
+        if ([state->device supportsFamily:MTLGPUFamilyApple1])
+            descriptor.storageMode = MTLStorageModeMemoryless;
+    }
+    color = [state->device newTextureWithDescriptor:descriptor];
+    descriptor.pixelFormat = MTLPixelFormatDepth32Float;
+    depth = [state->device newTextureWithDescriptor:descriptor];
+    if (!color || !depth)
+        return false;
+    state->antialias_color[slot] = color;
+    state->antialias_depth[slot] = depth;
+    state->antialias_failed_width[slot] = 0;
+    state->antialias_failed_height[slot] = 0;
+    return true;
+}
+
+bool cc_platform_set_antialiasing(CcPlatform *platform, bool enabled) {
+    CcMetalState *state = cc_state(platform);
+    if (!state)
+        return false;
+    if (!enabled) {
+        cc_wait_for_metal(state);
+        state->antialiasing = false;
+        for (NSUInteger slot = 0; slot < CC_IN_FLIGHT_FRAMES; ++slot) {
+            state->antialias_color[slot] = nil;
+            state->antialias_depth[slot] = nil;
+            state->antialias_failed_width[slot] = 0;
+            state->antialias_failed_height[slot] = 0;
+        }
+        return true;
+    }
+    state->antialias_samples = [state->device supportsTextureSampleCount:4]   ? 4
+                               : [state->device supportsTextureSampleCount:2] ? 2
+                                                                              : 0;
+    if (!state->antialias_samples || !cc_metal_prepare_antialias_pipelines(state))
+        return false;
+    state->antialiasing = true;
+    return true;
+}
+
 bool cc_prepare_metal(CcMetalState *state) {
     state->device = MTLCreateSystemDefaultDevice();
     if (!state->device) {
@@ -185,6 +246,7 @@ void cc_platform_begin(CcPlatform *platform, CcColor clear_color) {
         return;
     }
     state->clear_color = clear_color;
+    state->rendering_multisample = false;
     state->render_target_handle = 0;
     state->vertex_count = 0;
     state->batch_count = 0;
@@ -464,6 +526,12 @@ void cc_platform_prepare_material(CcPlatform *platform, const CcMaterialQuad *qu
     uint8_t blend_key = blend.enabled ? (uint8_t)(blend.source * 8 + blend.destination)
                                       : CC_BLEND_DISABLED;
     (void)cc_metal_material_pipeline(state, kind, blend_key);
+    if (state->antialiasing) {
+        bool previous = state->rendering_multisample;
+        state->rendering_multisample = true;
+        (void)cc_metal_material_pipeline(state, kind, blend_key);
+        state->rendering_multisample = previous;
+    }
 }
 
 static bool cc_upload_vertices(CcMetalState *state, NSUInteger slot) {
@@ -568,7 +636,8 @@ static void cc_encode_batches(CcMetalState *state, id<MTLRenderCommandEncoder> e
         id<MTLRenderPipelineState> pipeline =
             kind != CC_BATCH_BASIC
                 ? cc_metal_material_pipeline(state, kind, batch->state.blend_key)
-                : state->pipeline;
+            : state->rendering_multisample ? state->antialias_pipeline
+                                           : state->pipeline;
         if (!pipeline) {
             continue;
         }
@@ -647,7 +716,8 @@ static bool cc_encode_capture_presentation(CcMetalState *state,
         vertices[i] = corners[cc_quad_triangle_order[i]];
     /* A copied constant buffer leaves the scene's in-flight vertex data intact. */
     [encoder setVertexBytes:vertices length:sizeof(vertices) atIndex:0];
-    [encoder setRenderPipelineState:state->pipeline];
+    /* Copy the completed framebuffer without blending its alpha a second time. */
+    [encoder setRenderPipelineState:state->presentation_pipeline];
     [encoder setDepthStencilState:state->depth_states[0]];
     [encoder setFragmentTexture:state->capture_texture atIndex:0];
     [encoder setFragmentSamplerState:state->samplers[0][0][0] atIndex:0];
@@ -721,8 +791,19 @@ void cc_platform_end(CcPlatform *platform) {
             fprintf(stderr, "Metal vertex buffer allocation failed.\n");
             return;
         }
-        id<MTLTexture> depth = cc_depth_texture(state, slot, target != nil,
-                                                drawable_width, drawable_height);
+        state->rendering_multisample =
+            !target && state->antialiasing &&
+            cc_antialias_targets(state, slot, drawable_width, drawable_height);
+        if (!target && state->antialiasing && !state->rendering_multisample &&
+            !state->warned_antialiasing) {
+            fprintf(stderr,
+                    "Metal: antialias target unavailable; using ordinary rendering.\n");
+            state->warned_antialiasing = true;
+        }
+        id<MTLTexture> depth = state->rendering_multisample
+                                   ? state->antialias_depth[slot]
+                                   : cc_depth_texture(state, slot, target != nil,
+                                                      drawable_width, drawable_height);
         if (!depth) {
             fprintf(stderr, "Metal depth target allocation failed.\n");
             return;
@@ -739,11 +820,16 @@ void cc_platform_end(CcPlatform *platform) {
 
         MTLRenderPassColorAttachmentDescriptor *color =
             state->render_pass.colorAttachments[0];
-        color.texture = target      ? target
-                        : capturing ? state->capture_texture
-                                    : drawable.texture;
+        id<MTLTexture> output = target      ? target
+                                : capturing ? state->capture_texture
+                                            : drawable.texture;
+        color.texture =
+            state->rendering_multisample ? state->antialias_color[slot] : output;
+        color.resolveTexture = state->rendering_multisample ? output : nil;
         color.loadAction = MTLLoadActionClear;
-        color.storeAction = MTLStoreActionStore;
+        color.storeAction = state->rendering_multisample
+                                ? MTLStoreActionMultisampleResolve
+                                : MTLStoreActionStore;
         color.clearColor =
             target ? MTLClearColorMake(state->clear_color.r, state->clear_color.g,
                                        state->clear_color.b, state->clear_color.a)
@@ -755,6 +841,7 @@ void cc_platform_end(CcPlatform *platform) {
         id<MTLRenderCommandEncoder> encoder =
             [commands renderCommandEncoderWithDescriptor:state->render_pass];
         color.texture = nil;
+        color.resolveTexture = nil;
         state->render_pass.depthAttachment.texture = nil;
         if (!encoder) {
             return;
@@ -762,6 +849,7 @@ void cc_platform_end(CcPlatform *platform) {
 
         cc_encode_batches(state, encoder, content, slot);
         [encoder endEncoding];
+        state->rendering_multisample = false;
         bool readback_encoded = capturing && cc_encode_readback(state, commands);
         if (capturing && drawable &&
             !cc_encode_capture_presentation(state, commands, drawable.texture, slot))

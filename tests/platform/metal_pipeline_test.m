@@ -5,6 +5,7 @@
 #include <float.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static unsigned pipeline_count(CcMetalState *state) {
@@ -305,6 +306,192 @@ static void test_framebuffer_capture(CcPlatform *platform, CcMetalState *state) 
     cc_platform_set_fade_alpha(platform, 0);
 }
 
+static unsigned count_partial_pixels(const CcFramebuffer *frame) {
+    unsigned count = 0;
+    for (int y = 0; y < frame->height; ++y) {
+        for (int x = 0; x < frame->width; ++x) {
+            const uint8_t *pixel =
+                frame->rgba + (size_t)y * frame->stride + (size_t)x * 4;
+            assert(pixel[0] == pixel[1] && pixel[1] == pixel[2] && pixel[3] == 255);
+            count += pixel[0] > 0 && pixel[0] < 255;
+        }
+    }
+    return count;
+}
+
+static void draw_diagonal(CcPlatform *platform) {
+    const CcDrawVertex vertices[4] = {
+        {.x = 103, .y = 61, .color = {1, 1, 1, 1}},
+        {.x = 457, .y = 127, .color = {1, 1, 1, 1}},
+        {.x = 151, .y = 359, .color = {1, 1, 1, 1}},
+        {.x = 521, .y = 411, .color = {1, 1, 1, 1}},
+    };
+    cc_platform_begin(platform, (CcColor){0, 0, 0, 1});
+    cc_platform_draw_vertices(platform, vertices, 0);
+    cc_platform_end(platform);
+}
+
+static void draw_rotated_texture(CcPlatform *platform, uint32_t texture,
+                                 unsigned stage_count) {
+    CcMaterialQuad quad = sampling_quad(texture, stage_count);
+    quad.nearest[0] = true;
+    quad.wrap_s[0] = 1;
+    quad.wrap_t[0] = 1;
+    const float uv[4][2] = {
+        {0.17f, 0.29f},
+        {6.17f, 3.29f},
+        {-2.83f, 6.29f},
+        {3.17f, 9.29f},
+    };
+    for (unsigned vertex = 0; vertex < 4; ++vertex) {
+        quad.vertices[vertex].x = vertex & 1 ? CC_FRAME_WIDTH : 0;
+        quad.vertices[vertex].y = vertex & 2 ? CC_FRAME_HEIGHT : 0;
+        memcpy(quad.vertices[vertex].uv[0], uv[vertex], sizeof(uv[vertex]));
+    }
+    cc_platform_prepare_material(platform, &quad);
+    cc_platform_begin(platform, (CcColor){0, 0, 0, 1});
+    cc_platform_draw_material_quad(platform, &quad);
+    cc_platform_end(platform);
+}
+
+static void test_texture_sample_coverage(CcPlatform *platform, CcMetalState *state) {
+    const uint8_t checker[] = {
+        0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255, 255, 0, 0, 0, 255,
+    };
+    uint32_t texture = cc_platform_create_texture(platform, 2, 2, checker);
+    assert(texture);
+    [state->view setFrameSize:NSMakeSize(80, 60)];
+    CcFramebuffer frame = {0};
+    assert(cc_platform_capture_begin(platform, &frame));
+    /* The full-screen primitive has no edges inside the content. Gray coverage
+     * therefore comes from texture samples, not ordinary polygon-edge MSAA. */
+    for (unsigned stages = 0; stages <= 1; ++stages) {
+        assert(cc_platform_set_antialiasing(platform, false));
+        draw_rotated_texture(platform, texture, stages);
+        assert(cc_platform_capture_frame(platform, &frame));
+        assert(count_partial_pixels(&frame) == 0);
+        assert(cc_platform_set_antialiasing(platform, true));
+        draw_rotated_texture(platform, texture, stages);
+        assert(cc_platform_capture_frame(platform, &frame));
+        assert(count_partial_pixels(&frame) > 100);
+        assert(cc_platform_set_antialiasing(platform, false));
+        draw_rotated_texture(platform, texture, stages);
+        assert(cc_platform_capture_frame(platform, &frame));
+        assert(count_partial_pixels(&frame) == 0);
+    }
+    cc_platform_capture_end(platform);
+    cc_platform_destroy_texture(platform, texture);
+}
+
+static void test_composed_alpha(CcPlatform *platform, CcMetalState *state) {
+    [state->view setFrameSize:NSMakeSize(80, 60)];
+    CcFramebuffer frame = {0};
+    assert(cc_platform_capture_begin(platform, &frame));
+    const float alphas[] = {0.0f, 0.25f, 0.5f};
+    for (unsigned enabled = 0; enabled < 2; ++enabled) {
+        assert(cc_platform_set_antialiasing(platform, enabled != 0));
+        for (unsigned index = 0; index < sizeof(alphas) / sizeof(alphas[0]); ++index) {
+            CcMaterialQuad quad = sampling_quad(0, 0);
+            for (unsigned vertex = 0; vertex < 4; ++vertex) {
+                quad.vertices[vertex].x = vertex & 1 ? CC_FRAME_WIDTH : 0;
+                quad.vertices[vertex].y = vertex & 2 ? CC_FRAME_HEIGHT : 0;
+                quad.vertices[vertex].color = (CcColor){1, 0.25f, 0.5f, alphas[index]};
+            }
+            cc_platform_prepare_material(platform, &quad);
+            cc_platform_begin(platform, (CcColor){0, 0, 0, 1});
+            cc_platform_draw_material_quad(platform, &quad);
+            cc_platform_end(platform);
+            assert(cc_platform_capture_frame(platform, &frame));
+            const uint8_t *pixel = frame.rgba +
+                                   (size_t)(frame.height / 2) * frame.stride +
+                                   (size_t)(frame.width / 2) * 4;
+            assert(pixel[0] == 255 && pixel[1] == 64 && pixel[2] == 128);
+            assert(abs((int)pixel[3] - (int)lroundf(alphas[index] * 255)) <= 1);
+        }
+    }
+    cc_platform_capture_end(platform);
+}
+
+static void test_antialiasing(CcPlatform *platform, CcMetalState *state) {
+    assert(!cc_platform_set_antialiasing(NULL, true));
+    assert(cc_platform_set_antialiasing(platform, false));
+    [state->view setFrameSize:NSMakeSize(80, 60)];
+    CcFramebuffer frame = {0};
+    assert(cc_platform_capture_begin(platform, &frame));
+    int width = frame.width;
+    int height = frame.height;
+    draw_diagonal(platform);
+    assert(cc_platform_capture_frame(platform, &frame));
+    assert(count_partial_pixels(&frame) == 0);
+    const uint8_t *capture_storage = frame.rgba;
+    assert(cc_platform_set_antialiasing(platform, true));
+    assert(state->antialias_samples == 2 || state->antialias_samples == 4);
+    assert(state->antialias_pipeline);
+    id<MTLTexture> colors[CC_IN_FLIGHT_FRAMES] = {nil};
+    id<MTLTexture> depths[CC_IN_FLIGHT_FRAMES] = {nil};
+    for (unsigned iteration = 0; iteration < CC_IN_FLIGHT_FRAMES * 2; ++iteration) {
+        draw_diagonal(platform);
+        assert(cc_platform_capture_frame(platform, &frame));
+        assert(frame.width == width && frame.height == height &&
+               frame.rgba == capture_storage);
+        assert(count_partial_pixels(&frame) > 0);
+        assert_capture_pixel(&frame, 0, 0, 0, 0, 0);
+        NSUInteger slot = (state->frame_number - 1) % CC_IN_FLIGHT_FRAMES;
+        assert(state->antialias_color[slot].sampleCount == state->antialias_samples);
+        assert(state->antialias_depth[slot].sampleCount == state->antialias_samples);
+        assert(state->antialias_color[slot].width == (NSUInteger)width);
+        assert(state->antialias_color[slot].height == (NSUInteger)height);
+        if (iteration < CC_IN_FLIGHT_FRAMES) {
+            colors[slot] = state->antialias_color[slot];
+            depths[slot] = state->antialias_depth[slot];
+        } else {
+            assert(colors[slot] == state->antialias_color[slot]);
+            assert(depths[slot] == state->antialias_depth[slot]);
+        }
+    }
+
+    /* Native logical-size previews must neither resolve nor replace the last
+     * recorded window frame, even while presentation smoothing is enabled. */
+    uint32_t preview = cc_platform_create_render_texture(platform);
+    assert(preview &&
+           cc_platform_begin_target(platform, preview, (CcColor){1, 0, 0, 1}));
+    cc_platform_end(platform);
+    cc_wait_for_metal(state);
+    assert(cc_platform_capture_frame(platform, &frame) &&
+           frame.rgba == capture_storage);
+    assert(count_partial_pixels(&frame) > 0);
+    id<MTLTexture> preview_texture = state->textures[preview];
+    assert(preview_texture.sampleCount == 1 &&
+           preview_texture.width == CC_FRAME_WIDTH &&
+           preview_texture.height == CC_FRAME_HEIGHT);
+    cc_platform_destroy_texture(platform, preview);
+
+    /* Material preparation compiles the enabled sample count before drawing. */
+    CcMaterialQuad material = sampling_quad(0, 1);
+    material.blend_mode[0] = 1;
+    material.blend_mode[1] = 1;
+    material.blend_mode[2] = 1;
+    cc_platform_prepare_material(platform, &material);
+    assert(state->antialias_material_pipelines[1][9]);
+    cc_platform_capture_end(platform);
+    [state->view setFrameSize:NSMakeSize(97, 73)];
+    assert(cc_platform_capture_begin(platform, &frame));
+    draw_diagonal(platform);
+    assert(cc_platform_capture_frame(platform, &frame));
+    assert(frame.width != width && frame.height != height);
+    NSUInteger slot = (state->frame_number - 1) % CC_IN_FLIGHT_FRAMES;
+    assert(state->antialias_color[slot] != colors[slot]);
+    assert(state->antialias_color[slot].width == (NSUInteger)frame.width);
+    assert(state->antialias_color[slot].height == (NSUInteger)frame.height);
+    assert(cc_platform_set_antialiasing(platform, false));
+    for (unsigned index = 0; index < CC_IN_FLIGHT_FRAMES; ++index)
+        assert(!state->antialias_color[index] && !state->antialias_depth[index]);
+    draw_diagonal(platform);
+    assert(cc_platform_capture_frame(platform, &frame));
+    assert(count_partial_pixels(&frame) == 0);
+    cc_platform_capture_end(platform);
+}
+
 int main(void) {
     @autoreleasepool {
         if (!MTLCreateSystemDefaultDevice()) {
@@ -319,6 +506,9 @@ int main(void) {
         test_clip_rendering(&platform, state);
         test_material_sampling(&platform, state);
         test_framebuffer_capture(&platform, state);
+        test_antialiasing(&platform, state);
+        test_texture_sample_coverage(&platform, state);
+        test_composed_alpha(&platform, state);
         cc_wait_for_metal(state);
         cc_release_metal(state);
     }

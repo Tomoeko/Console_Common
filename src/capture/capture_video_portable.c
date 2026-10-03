@@ -1,7 +1,11 @@
-#include "capture_video.h"
 #include "capture_jpeg.h"
+#include "capture_video.h"
 
 #include <stdlib.h>
+
+bool cc_capture_video_web_available(void) {
+    return false;
+}
 
 struct CcCaptureVideo {
     CcCaptureJpeg *jpeg;

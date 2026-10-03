@@ -122,6 +122,20 @@ struct CcPlatform {
     id<MTLDevice> device;
     id<MTLCommandQueue> command_queue;
     id<MTLRenderPipelineState> pipeline;
+    id<MTLRenderPipelineState> presentation_pipeline;
+    id<MTLRenderPipelineState> antialias_pipeline;
+    id<MTLFunction> basic_fragment_function;
+    NSUInteger antialias_samples;
+    bool antialiasing;
+    bool rendering_multisample;
+    bool warned_antialiasing;
+    id<MTLTexture> antialias_color[CC_IN_FLIGHT_FRAMES];
+    id<MTLTexture> antialias_depth[CC_IN_FLIGHT_FRAMES];
+    NSUInteger antialias_failed_width[CC_IN_FLIGHT_FRAMES];
+    NSUInteger antialias_failed_height[CC_IN_FLIGHT_FRAMES];
+    id<MTLRenderPipelineState>
+        antialias_material_pipelines[2][CC_MATERIAL_PIPELINE_VARIANTS];
+    bool antialias_pipeline_attempted[2][CC_MATERIAL_PIPELINE_VARIANTS];
     id<MTLFunction> vertex_function;
     id<MTLFunction> material_fragment_function;
     id<MTLFunction> tev_fragment_function;
@@ -165,6 +179,7 @@ struct CcPlatform {
 /* GPU initialization precedes window creation. The window adapter retains
  * CcMetalState through platform->metal_state until cc_platform_destroy. */
 bool cc_metal_prepare_pipelines(CcMetalState *state, id<MTLFunction> basic_fragment);
+bool cc_metal_prepare_antialias_pipelines(CcMetalState *state);
 id<MTLRenderPipelineState>
 cc_metal_material_pipeline(CcMetalState *state, CcBatchKind kind, uint8_t blend_key);
 

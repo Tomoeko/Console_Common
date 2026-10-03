@@ -14,6 +14,7 @@
 
 #include <stddef.h>
 #include <math.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -65,6 +66,19 @@ struct CcPlatform {
     GLuint render_texture;
     GLuint render_framebuffer;
     GLuint render_depth;
+    bool antialiasing;
+    bool supersampling;
+    bool copying_framebuffer;
+    bool warned_antialiasing;
+    GLuint antialias_texture;
+    GLuint antialias_framebuffer;
+    GLuint antialias_depth;
+    int antialias_width;
+    int antialias_height;
+    int antialias_failed_width;
+    int antialias_failed_height;
+    int output_width;
+    int output_height;
     GLuint capture_texture;
     GLuint capture_framebuffer;
     GLuint capture_depth;
@@ -93,6 +107,20 @@ struct CcPlatform {
     GLuint batch_texture;
     float fade_alpha;
 };
+
+static void cc_release_antialiasing(CcPlatform *platform) {
+    if (platform->antialias_depth)
+        glDeleteRenderbuffers(1, &platform->antialias_depth);
+    if (platform->antialias_framebuffer)
+        glDeleteFramebuffers(1, &platform->antialias_framebuffer);
+    if (platform->antialias_texture)
+        glDeleteTextures(1, &platform->antialias_texture);
+    platform->antialias_depth = 0;
+    platform->antialias_framebuffer = 0;
+    platform->antialias_texture = 0;
+    platform->antialias_width = 0;
+    platform->antialias_height = 0;
+}
 
 static void cc_set_depth(CcPlatform *platform, unsigned key) {
     if (platform->depth_key == key)
@@ -142,6 +170,68 @@ static GLuint cc_upload_texture_storage(int width, int height, const uint8_t *rg
         return 0;
     }
     return texture;
+}
+
+static bool cc_prepare_antialiasing(CcPlatform *platform, int width, int height) {
+    if (width <= 0 || height <= 0 || width > INT_MAX / 2 || height > INT_MAX / 2)
+        return false;
+    if (platform->antialias_width == width * 2 &&
+        platform->antialias_height == height * 2)
+        return true;
+    if (platform->antialias_failed_width == width &&
+        platform->antialias_failed_height == height)
+        return false;
+    platform->antialias_failed_width = width;
+    platform->antialias_failed_height = height;
+    GLint texture_limit = 0;
+    GLint depth_limit = 0;
+    glGetIntegerv(GL_MAX_TEXTURE_SIZE, &texture_limit);
+    glGetIntegerv(GL_MAX_RENDERBUFFER_SIZE, &depth_limit);
+    if (width * 2 > texture_limit || height * 2 > texture_limit ||
+        width * 2 > depth_limit || height * 2 > depth_limit)
+        return false;
+
+    GLint previous = 0;
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &previous);
+    GLuint texture = cc_upload_texture_storage(width * 2, height * 2, NULL, GL_LINEAR);
+    GLuint framebuffer = 0;
+    GLuint depth = 0;
+    glGenFramebuffers(1, &framebuffer);
+    glGenRenderbuffers(1, &depth);
+    bool okay = false;
+    if (!texture || !framebuffer || !depth)
+        goto release_targets;
+    glBindRenderbuffer(GL_RENDERBUFFER, depth);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT16, width * 2, height * 2);
+    glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture,
+                           0);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER,
+                              depth);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE ||
+        glGetError() != GL_NO_ERROR)
+        goto release_targets;
+    cc_release_antialiasing(platform);
+    platform->antialias_texture = texture;
+    platform->antialias_framebuffer = framebuffer;
+    platform->antialias_depth = depth;
+    platform->antialias_width = width * 2;
+    platform->antialias_height = height * 2;
+    platform->antialias_failed_width = 0;
+    platform->antialias_failed_height = 0;
+    okay = true;
+
+release_targets:
+    glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)previous);
+    if (!okay) {
+        if (depth)
+            glDeleteRenderbuffers(1, &depth);
+        if (framebuffer)
+            glDeleteFramebuffers(1, &framebuffer);
+        if (texture)
+            glDeleteTextures(1, &texture);
+    }
+    return okay;
 }
 
 static GLuint cc_upload_texture(CcPlatform *platform, int width, int height,
@@ -247,9 +337,14 @@ static void cc_flush(CcPlatform *platform) {
                           (const void *)offsetof(CcVertex, u));
     glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, (GLsizei)sizeof(CcVertex),
                           (const void *)offsetof(CcVertex, r));
-    glEnable(GL_BLEND);
-    glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE,
-                        GL_ONE_MINUS_SRC_ALPHA);
+    if (platform->copying_framebuffer) {
+        /* Resolved scene pixels already include their original blend result. */
+        glDisable(GL_BLEND);
+    } else {
+        glEnable(GL_BLEND);
+        glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE,
+                            GL_ONE_MINUS_SRC_ALPHA);
+    }
     glDrawArrays(GL_TRIANGLES, 0,
                  (GLsizei)(platform->quad_count * CC_VERTICES_PER_QUAD));
     platform->quad_count = 0;
@@ -380,6 +475,7 @@ void cc_platform_destroy(CcPlatform *platform) {
 
     if (cc_gles2_host_make_current(platform->host)) {
         cc_platform_capture_end(platform);
+        cc_release_antialiasing(platform);
         if (platform->white_texture != 0) {
             cc_delete_texture(platform, platform->white_texture);
         }
@@ -440,6 +536,30 @@ bool cc_platform_set_fullscreen(CcPlatform *platform, bool fullscreen) {
     return platform != NULL && cc_gles2_host_set_fullscreen(platform->host, fullscreen);
 }
 
+bool cc_platform_set_antialiasing(CcPlatform *platform, bool enabled) {
+    if (!platform)
+        return false;
+    if (platform->quad_count || platform->rendering_target)
+        return false;
+    if (!enabled) {
+        platform->antialiasing = false;
+        platform->supersampling = false;
+        cc_release_antialiasing(platform);
+        return true;
+    }
+    int width = platform->capture_width;
+    int height = platform->capture_height;
+    if (!platform->capture_framebuffer)
+        cc_gles2_host_surface_size(platform->host, &width, &height);
+    platform->antialias_failed_width = 0;
+    platform->antialias_failed_height = 0;
+    if (!cc_prepare_antialiasing(platform, width, height))
+        return false;
+    platform->antialiasing = true;
+    cc_frame_damage_invalidate(platform->retained.commands);
+    return true;
+}
+
 void cc_platform_begin(CcPlatform *platform, CcColor clear_color) {
     if (platform == NULL) {
         return;
@@ -460,18 +580,37 @@ void cc_platform_begin(CcPlatform *platform, CcColor clear_color) {
         cc_gles2_host_surface_size(platform->host, &width, &height);
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
     }
+    platform->output_width = width;
+    platform->output_height = height;
+    CcViewport content = cc_viewport_fit(width, height);
+    platform->supersampling =
+        platform->antialiasing && cc_prepare_antialiasing(platform, width, height);
+    if (platform->supersampling) {
+        glBindFramebuffer(GL_FRAMEBUFFER, platform->antialias_framebuffer);
+        width *= 2;
+        height *= 2;
+        content.x *= 2;
+        content.y *= 2;
+        content.width *= 2;
+        content.height *= 2;
+        platform->retained.active = false;
+        platform->retained.recording = false;
+    } else if (platform->antialiasing && !platform->warned_antialiasing) {
+        fprintf(stderr,
+                "GLES2: antialias target unavailable; using ordinary rendering.\n");
+        platform->warned_antialiasing = true;
+    }
     if (platform->framebuffer_width != width || platform->framebuffer_height != height)
         cc_frame_damage_invalidate(platform->retained.commands);
     platform->framebuffer_width = width;
     platform->framebuffer_height = height;
-    platform->presentation = cc_viewport_fit(width, height);
-    CcViewport content = platform->presentation;
+    platform->presentation = content;
     glDisable(GL_SCISSOR_TEST);
     platform->scissor_enabled = false;
     cc_clear_depth(platform);
     glViewport(content.x, height - content.y - content.height, content.width,
                content.height);
-    if (!platform->capture_framebuffer &&
+    if (!platform->capture_framebuffer && !platform->supersampling &&
         cc_gles2_retained_begin(&platform->retained, content.width, content.height,
                                 clear_color)) {
         /* Retain the content pixels in EGL's original back buffer. Clear only
@@ -807,8 +946,43 @@ static void cc_present_capture(CcPlatform *platform) {
         .v1 = 1 - (float)(source.y + source.height) / (float)platform->capture_height,
         .color = {1, 1, 1, 1},
         .texture = platform->capture_texture};
+    platform->copying_framebuffer = true;
     cc_platform_draw_quad(platform, &image);
     cc_flush(platform);
+    platform->copying_framebuffer = false;
+}
+
+static void cc_resolve_antialiasing(CcPlatform *platform) {
+    if (!platform->supersampling)
+        return;
+    CcViewport source = platform->presentation;
+    glBindFramebuffer(GL_FRAMEBUFFER, platform->capture_framebuffer);
+    platform->framebuffer_width = platform->output_width;
+    platform->framebuffer_height = platform->output_height;
+    platform->presentation =
+        cc_viewport_fit(platform->output_width, platform->output_height);
+    CcViewport content = platform->presentation;
+    glDisable(GL_SCISSOR_TEST);
+    platform->scissor_enabled = false;
+    glViewport(content.x, platform->output_height - content.y - content.height,
+               content.width, content.height);
+    cc_clear_depth(platform);
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    CcQuad image = {
+        .width = CC_FRAME_WIDTH,
+        .height = CC_FRAME_HEIGHT,
+        .u0 = (float)source.x / (float)platform->antialias_width,
+        .v0 = 1 - (float)source.y / (float)platform->antialias_height,
+        .u1 = (float)(source.x + source.width) / (float)platform->antialias_width,
+        .v1 = 1 - (float)(source.y + source.height) / (float)platform->antialias_height,
+        .color = {1, 1, 1, 1},
+        .texture = platform->antialias_texture};
+    platform->copying_framebuffer = true;
+    cc_platform_draw_quad(platform, &image);
+    cc_flush(platform);
+    platform->copying_framebuffer = false;
+    platform->supersampling = false;
 }
 
 void cc_platform_end(CcPlatform *platform) {
@@ -837,6 +1011,7 @@ void cc_platform_end(CcPlatform *platform) {
         return;
     }
     cc_gles2_retained_render(&platform->retained, platform, cc_flush);
+    cc_resolve_antialiasing(platform);
     if (platform->capture_framebuffer)
         cc_present_capture(platform);
     if (!cc_gles2_host_present(platform->host))
@@ -1020,6 +1195,7 @@ bool cc_platform_begin_target(CcPlatform *platform, uint32_t texture,
     cc_frame_damage_invalidate(platform->retained.commands);
     platform->quad_count = 0;
     platform->rendering_target = true;
+    platform->supersampling = false;
     platform->framebuffer_width = CC_FRAME_WIDTH;
     platform->framebuffer_height = CC_FRAME_HEIGHT;
     platform->presentation = (CcViewport){0, 0, CC_FRAME_WIDTH, CC_FRAME_HEIGHT};

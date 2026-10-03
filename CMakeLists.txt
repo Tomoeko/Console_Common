@@ -97,6 +97,13 @@ if(APPLE AND CC_USE_SYSTEM_VIDEO_ENCODER)
 else()
     target_sources(console_common_capture PRIVATE src/capture/capture_video_portable.c)
 endif()
+if(APPLE)
+    target_sources(console_common_capture PRIVATE
+        src/platform/apple/capture_audio_apple.c)
+    target_link_libraries(console_common_capture PRIVATE "-framework AudioToolbox")
+else()
+    target_sources(console_common_capture PRIVATE src/capture/capture_audio_unavailable.c)
+endif()
 if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
     target_compile_options(console_common_capture PRIVATE
         -Wall -Wextra -Wpedantic -Wconversion)

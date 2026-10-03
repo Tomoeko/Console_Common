@@ -155,6 +155,12 @@ bool cc_platform_poll(CcPlatform *platform, CcEvent *event);
  * A headless backend cannot enter fullscreen. */
 bool cc_platform_is_fullscreen(CcPlatform *platform);
 bool cc_platform_set_fullscreen(CcPlatform *platform, bool fullscreen);
+/* Optional presentation smoothing preserves original textures and scene geometry.
+ * Metal shades four samples per pixel (two when four are unavailable); core ES2
+ * renders at twice each output dimension and resolves once with linear sampling.
+ * This increases target storage and fill cost. Configure before loading materials.
+ * Failure leaves ordinary rendering available. Preview targets remain unchanged. */
+bool cc_platform_set_antialiasing(CcPlatform *platform, bool enabled);
 void cc_platform_begin(CcPlatform *platform, CcColor clear_color);
 /* Clip subsequent draws to a logical framebuffer rectangle. NULL disables
  * clipping. Both backends preserve draw order across clip changes. */

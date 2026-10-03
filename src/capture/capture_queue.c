@@ -127,11 +127,16 @@ static void release_queue(CcCaptureQueue *queue) {
     free(queue);
 }
 
-CcCaptureQueue *cc_capture_queue_open(const char *path, unsigned width, unsigned height,
-                                      uint32_t video_timescale, uint32_t audio_rate) {
+CcCaptureQueue *cc_capture_queue_open_with_audio(const char *path, unsigned width,
+                                                 unsigned height,
+                                                 uint32_t video_timescale,
+                                                 uint32_t audio_rate,
+                                                 CcCaptureAudioMode audio_mode) {
     if (!path || !path[0] || !video_timescale || !audio_rate || audio_rate > 65535 ||
         !width || !height || width > 4096 || height > 4096 ||
-        (size_t)width > SIZE_MAX / 4 || (size_t)height > SIZE_MAX / ((size_t)width * 4))
+        (size_t)width > SIZE_MAX / 4 ||
+        (size_t)height > SIZE_MAX / ((size_t)width * 4) ||
+        !cc_capture_audio_mode_supported(audio_mode))
         return NULL;
     size_t stride = (size_t)width * 4;
     size_t bytes = stride * height;
@@ -156,8 +161,8 @@ CcCaptureQueue *cc_capture_queue_open(const char *path, unsigned width, unsigned
     if (pthread_cond_init(&queue->condition, NULL) != 0)
         goto release_failed;
     queue->condition_ready = true;
-    queue->writer =
-        cc_capture_writer_open(path, width, height, video_timescale, audio_rate);
+    queue->writer = cc_capture_writer_open_with_audio(
+        path, width, height, video_timescale, audio_rate, audio_mode);
     if (!queue->writer)
         goto release_failed;
     if (pthread_create(&queue->worker, NULL, writer_worker, queue) != 0)
@@ -169,6 +174,12 @@ release_failed:
     cc_capture_writer_close(queue->writer);
     release_queue(queue);
     return NULL;
+}
+
+CcCaptureQueue *cc_capture_queue_open(const char *path, unsigned width, unsigned height,
+                                      uint32_t video_timescale, uint32_t audio_rate) {
+    return cc_capture_queue_open_with_audio(path, width, height, video_timescale,
+                                            audio_rate, CC_CAPTURE_AUDIO_NORMAL);
 }
 
 static unsigned available_video_slot(const CcCaptureQueue *queue) {

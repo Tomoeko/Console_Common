@@ -17,6 +17,10 @@ enum {
     CAPTURE_KEYFRAME_INTERVAL = 120
 };
 
+bool cc_capture_video_web_available(void) {
+    return true;
+}
+
 struct CcCaptureVideo {
     VTCompressionSessionRef session;
     CVPixelBufferRef pixels;

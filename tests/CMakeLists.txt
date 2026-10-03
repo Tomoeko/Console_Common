@@ -13,6 +13,38 @@ if(APPLE)
     add_test(NAME cc-audio-output-apple COMMAND cc-audio-output-apple-test)
 endif()
 
+if(APPLE)
+    add_executable(cc-capture-audio-apple-test capture/capture_audio_apple_test.c)
+    target_link_libraries(cc-capture-audio-apple-test PRIVATE console_common_capture
+        "-framework CoreFoundation")
+    target_include_directories(cc-capture-audio-apple-test PRIVATE "${common_root}/src")
+    if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(cc-capture-audio-apple-test PRIVATE
+            -Wall -Wextra -Wpedantic -Wconversion -UNDEBUG)
+    endif()
+    set(audio_test_directory "${CMAKE_BINARY_DIR}/tests/capture-audio-apple")
+    file(MAKE_DIRECTORY "${audio_test_directory}")
+    add_test(NAME cc-capture-audio-apple
+        COMMAND cc-capture-audio-apple-test "${audio_test_directory}")
+    set_tests_properties(cc-capture-audio-apple PROPERTIES
+        SKIP_RETURN_CODE 77 FIXTURES_SETUP capture-web-fixtures)
+    if(CC_USE_SYSTEM_VIDEO_ENCODER)
+        enable_language(OBJC)
+        add_executable(cc-capture-player-apple-test capture/capture_player_apple_test.m)
+        target_link_libraries(cc-capture-player-apple-test PRIVATE
+            "-framework AVFoundation" "-framework CoreMedia" "-framework Foundation")
+        if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+            target_compile_options(cc-capture-player-apple-test PRIVATE
+                -Wall -Wextra -Wpedantic -Wconversion -UNDEBUG
+                -Wno-deprecated-declarations -fobjc-arc)
+        endif()
+        add_test(NAME cc-capture-player-apple
+            COMMAND cc-capture-player-apple-test "${audio_test_directory}")
+        set_tests_properties(cc-capture-player-apple PROPERTIES
+            FIXTURES_REQUIRED capture-web-fixtures)
+    endif()
+endif()
+
 # The Linux route is mocked on Unix, including Apple hosts without ALSA.
 if(UNIX)
     add_executable(cc-audio-output-linux-test audio/output_linux_test.c)

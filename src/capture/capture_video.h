@@ -31,6 +31,7 @@ typedef struct {
  * encoded frame and remain borrowed until close. RGB input is not resized. */
 CcCaptureVideo *cc_capture_video_open(unsigned width, unsigned height,
                                       uint32_t video_timescale);
+bool cc_capture_video_web_available(void);
 bool cc_capture_video_encode(CcCaptureVideo *video, const uint8_t *rgba,
                              size_t row_stride, uint32_t duration_ticks,
                              const uint8_t **sample, size_t *size, bool *keyframe);

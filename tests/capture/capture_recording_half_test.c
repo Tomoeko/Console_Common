@@ -51,11 +51,14 @@ void cc_platform_capture_end(CcPlatform *platform) {
     platform->active = false;
 }
 
-CcCaptureQueue *cc_capture_queue_open(const char *path, unsigned width, unsigned height,
-                                      uint32_t timescale, uint32_t audio_rate) {
+CcCaptureQueue *cc_capture_queue_open_with_audio(const char *path, unsigned width,
+                                                 unsigned height, uint32_t timescale,
+                                                 uint32_t audio_rate,
+                                                 CcCaptureAudioMode audio_mode) {
     assert(path && !test_queue.active);
     assert(width == test_queue.width && height == test_queue.height);
     assert(timescale == 1000000 && audio_rate == 48000);
+    assert(audio_mode == CC_CAPTURE_AUDIO_NORMAL);
     test_queue.active = true;
     return &test_queue;
 }

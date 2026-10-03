@@ -2,6 +2,7 @@
 #define CONSOLE_COMMON_CAPTURE_RECORDING_H
 
 #include "console_common/platform/platform.h"
+#include "console_common/capture/capture_writer.h"
 
 typedef struct CcRecording CcRecording;
 
@@ -24,6 +25,7 @@ typedef struct {
     unsigned video_rate;
     const char *filename_prefix;
     bool half_size;
+    CcCaptureAudioMode audio_mode;
 } CcRecordingOptions;
 
 /* Options are copied; platform and audio context remain borrowed until close.

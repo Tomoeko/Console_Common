@@ -40,10 +40,12 @@ static int test_thread_create(pthread_t *thread, const pthread_attr_t *attribute
 
 static CcCaptureWriter *test_writer_open(const char *path, unsigned width,
                                          unsigned height, uint32_t video_timescale,
-                                         uint32_t audio_rate) {
-    return fail_open ? NULL
-                     : cc_capture_writer_open(path, width, height, video_timescale,
-                                              audio_rate);
+                                         uint32_t audio_rate,
+                                         CcCaptureAudioMode audio_mode) {
+    return fail_open
+               ? NULL
+               : cc_capture_writer_open_with_audio(path, width, height, video_timescale,
+                                                   audio_rate, audio_mode);
 }
 
 static bool wait_for_writer(void) {
@@ -90,13 +92,13 @@ static bool test_writer_audio(CcCaptureWriter *writer, const float *stereo,
 #define malloc test_allocate
 #define calloc test_zero_allocate
 #define pthread_create test_thread_create
-#define cc_capture_writer_open test_writer_open
+#define cc_capture_writer_open_with_audio test_writer_open
 #define cc_capture_writer_video test_writer_video
 #define cc_capture_writer_audio test_writer_audio
 #include "../../src/capture/capture_queue.c"
 #undef cc_capture_writer_audio
 #undef cc_capture_writer_video
-#undef cc_capture_writer_open
+#undef cc_capture_writer_open_with_audio
 #undef pthread_create
 #undef calloc
 #undef malloc
