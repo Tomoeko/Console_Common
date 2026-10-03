@@ -17,6 +17,18 @@ static id<MTLRenderPipelineState> cc_make_pipeline(CcMetalState *state,
         MTLBlendFactorOneMinusDestinationAlpha,
     };
 
+    /* GX codes 2 and 3 refer to the other operand's color. */
+    static const MTLBlendFactor destination_factors[8] = {
+        MTLBlendFactorZero,
+        MTLBlendFactorOne,
+        MTLBlendFactorSourceColor,
+        MTLBlendFactorOneMinusSourceColor,
+        MTLBlendFactorSourceAlpha,
+        MTLBlendFactorOneMinusSourceAlpha,
+        MTLBlendFactorDestinationAlpha,
+        MTLBlendFactorOneMinusDestinationAlpha,
+    };
+
     MTLRenderPipelineDescriptor *description = [MTLRenderPipelineDescriptor new];
     description.rasterSampleCount = samples;
     description.vertexFunction = state->vertex_function;
@@ -30,7 +42,7 @@ static id<MTLRenderPipelineState> cc_make_pipeline(CcMetalState *state,
         attachment.rgbBlendOperation = MTLBlendOperationAdd;
         attachment.alphaBlendOperation = MTLBlendOperationAdd;
         attachment.sourceRGBBlendFactor = factors[blend_key / 8];
-        attachment.destinationRGBBlendFactor = factors[blend_key % 8];
+        attachment.destinationRGBBlendFactor = destination_factors[blend_key % 8];
         attachment.sourceAlphaBlendFactor = MTLBlendFactorOne;
         attachment.destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
     }

@@ -289,7 +289,7 @@ static void cc_bind_material_texture(CcPlatform *platform, GLint location,
     }
     glBindTexture(GL_TEXTURE_2D, texture);
     glUniform4f(location, (float)dimensions[0], (float)dimensions[1],
-                nearest && platform->fragment_highp ? 1.0f : 0.0f,
+                nearest ? (platform->fragment_highp ? 1.0f : -1.0f) : 0.0f,
                 flip_v ? 1.0f : 0.0f);
 }
 
@@ -751,8 +751,8 @@ void cc_platform_draw_vertices(CcPlatform *platform, const CcDrawVertex corners[
 }
 
 /* ES 2.0 has no sampler objects and cannot repeat arbitrary NPOT textures.
- * The material shader applies GX wrap coordinates before sampling textures
- * that remain CLAMP_TO_EDGE at the API level. */
+ * The material shader folds GX coordinates and blends across repeat seams,
+ * while textures remain CLAMP_TO_EDGE at the API level. */
 static bool cc_tev_supported(CcPlatform *platform, const CcMaterialQuad *quad) {
     CcTevSupport support = cc_material_tev_support(quad, platform->fragment_highp);
     if (support == CC_TEV_STAGE_LIMIT && !platform->warned_tev_limit) {
@@ -840,7 +840,8 @@ void cc_platform_draw_material_quad(CcPlatform *platform, const CcMaterialQuad *
                                      platform->material_sampling_locations[unit],
                                      texture, quad->nearest[unit]);
             glUniform2f(platform->material_wrap_locations[unit],
-                        (float)quad->wrap_s[unit], (float)quad->wrap_t[unit]);
+                        (float)(quad->wrap_s[unit] < 3 ? quad->wrap_s[unit] : 0),
+                        (float)(quad->wrap_t[unit] < 3 ? quad->wrap_t[unit] : 0));
         }
     }
 
@@ -848,11 +849,16 @@ void cc_platform_draw_material_quad(CcPlatform *platform, const CcMaterialQuad *
                                       GL_DST_COLOR, GL_ONE_MINUS_DST_COLOR,
                                       GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA,
                                       GL_DST_ALPHA, GL_ONE_MINUS_DST_ALPHA};
+    static const GLenum destination_factors[8] = {GL_ZERO,      GL_ONE,
+                                                  GL_SRC_COLOR, GL_ONE_MINUS_SRC_COLOR,
+                                                  GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA,
+                                                  GL_DST_ALPHA, GL_ONE_MINUS_DST_ALPHA};
     if (!blend.enabled) {
         glDisable(GL_BLEND);
     } else {
         glEnable(GL_BLEND);
-        glBlendFuncSeparate(factors[blend.source], factors[blend.destination], GL_ONE,
+        glBlendFuncSeparate(factors[blend.source],
+                            destination_factors[blend.destination], GL_ONE,
                             GL_ONE_MINUS_SRC_ALPHA);
     }
 

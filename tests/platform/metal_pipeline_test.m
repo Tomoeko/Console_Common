@@ -235,6 +235,37 @@ static void test_material_sampling(CcPlatform *platform, CcMetalState *state) {
     cc_platform_destroy_texture(platform, texture);
 }
 
+static void test_color_blend_factors(CcPlatform *platform, CcMetalState *state) {
+    uint32_t target = cc_platform_create_render_texture(platform);
+    assert(target);
+    id<MTLBuffer> readback =
+        [state->device newBufferWithLength:1024 options:MTLResourceStorageModeShared];
+    assert(readback);
+    const uint8_t factors[][2] = {{0, 2}, {0, 3}, {2, 0}, {3, 0}};
+    const uint8_t expected[][3] = {
+        {41, 46, 31}, {10, 107, 20}, {41, 46, 31}, {163, 31, 122}};
+    for (unsigned index = 0; index < 4; ++index) {
+        CcMaterialQuad quad = sampling_quad(0, 0);
+        quad.texture_count = 0;
+        quad.blend_mode[0] = 1;
+        quad.blend_mode[1] = factors[index][0];
+        quad.blend_mode[2] = factors[index][1];
+        for (unsigned vertex = 0; vertex < 4; ++vertex)
+            quad.vertices[vertex].color = (CcColor){0.8f, 0.3f, 0.6f, 1};
+        assert(
+            cc_platform_begin_target(platform, target, (CcColor){0.2f, 0.6f, 0.2f, 1}));
+        cc_platform_draw_material_quad(platform, &quad);
+        cc_platform_end(platform);
+        cc_wait_for_metal(state);
+        read_target_pixels(state, target, readback);
+        const uint8_t *bgra = readback.contents;
+        for (unsigned component = 0; component < 3; ++component)
+            assert(abs((int)bgra[2 - component] - (int)expected[index][component]) <=
+                   1);
+    }
+    cc_platform_destroy_texture(platform, target);
+}
+
 static void assert_capture_pixel(const CcFramebuffer *frame, int x, int y, uint8_t r,
                                  uint8_t g, uint8_t b) {
     const uint8_t *rgba = frame->rgba + (size_t)y * frame->stride + (size_t)x * 4;
@@ -505,6 +536,7 @@ int main(void) {
         test_signed_quad(&platform, state);
         test_clip_rendering(&platform, state);
         test_material_sampling(&platform, state);
+        test_color_blend_factors(&platform, state);
         test_framebuffer_capture(&platform, state);
         test_antialiasing(&platform, state);
         test_texture_sample_coverage(&platform, state);

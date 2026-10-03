@@ -7,6 +7,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Folded NPOT coordinates still need the opposite edge's linear-filter taps.
+ * Interior samples and clamp/mirror modes keep one texture lookup. */
 #define CC_MATERIAL_SAMPLING_SOURCE                                                    \
     "float wrapAxis(float coordinate, float mode) {\n"                                 \
     "    if (mode > 1.5) {\n"                                                          \
@@ -28,6 +30,37 @@
     "    if (sampling.w > 0.5)\n"                                                      \
     "        uv.y = 1.0 - uv.y;\n"                                                     \
     "    return uv;\n"                                                                 \
+    "}\n"                                                                              \
+    "vec4 sampleMaterial(sampler2D image, vec2 uv, vec2 mode, vec4 sampling) {\n"      \
+    "    uv = wrapUV(uv, mode);\n"                                                     \
+    "    vec4 pixel = texture2D(image, samplingUV(uv, sampling));\n"                   \
+    "    if (abs(sampling.z) > 0.5 ||\n"                                               \
+    "        ((mode.x < 0.5 || mode.x > 1.5) &&\n"                                     \
+    "         (mode.y < 0.5 || mode.y > 1.5)))\n"                                      \
+    "        return pixel;\n"                                                          \
+    "    vec2 edge = max(vec2(0.5) - min(uv, vec2(1.0) - uv) * sampling.xy,\n"         \
+    "                    vec2(0.0));\n"                                                \
+    "    if (mode.x < 0.5 || mode.x > 1.5)\n"                                          \
+    "        edge.x = 0.0;\n"                                                          \
+    "    if (mode.y < 0.5 || mode.y > 1.5)\n"                                          \
+    "        edge.y = 0.0;\n"                                                          \
+    "    vec2 opposite = vec2(uv.x < 0.5 ? 1.0 : 0.0,\n"                               \
+    "                         uv.y < 0.5 ? 1.0 : 0.0);\n"                              \
+    "    if (edge.x > 0.0) {\n"                                                        \
+    "        vec4 horizontal = texture2D(image,\n"                                     \
+    "            samplingUV(vec2(opposite.x, uv.y), sampling));\n"                     \
+    "        pixel = mix(pixel, horizontal, edge.x);\n"                                \
+    "    }\n"                                                                          \
+    "    if (edge.y > 0.0) {\n"                                                        \
+    "        vec4 vertical = texture2D(image,\n"                                       \
+    "            samplingUV(vec2(uv.x, opposite.y), sampling));\n"                     \
+    "        if (edge.x > 0.0) {\n"                                                    \
+    "            vec4 corner = texture2D(image, samplingUV(opposite, sampling));\n"    \
+    "            vertical = mix(vertical, corner, edge.x);\n"                          \
+    "        }\n"                                                                      \
+    "        pixel = mix(pixel, vertical, edge.y);\n"                                  \
+    "    }\n"                                                                          \
+    "    return pixel;\n"                                                              \
     "}\n"
 
 static const char *const cc_vertex_source =
@@ -137,11 +170,11 @@ static const char *const cc_material_fragment_source =
     "void main() {\n"
     "    vec4 pixel = u_registers[1];\n"
     "    if (u_texture_count > 0) {\n"
-    "        vec4 first = texture2D(u_texture0,\n"
-    "            samplingUV(wrapUV(v_uv0, u_wrap0), u_sampling0));\n"
+    "        vec4 first = sampleMaterial(u_texture0, v_uv0,\n"
+    "                                    u_wrap0, u_sampling0);\n"
     "        if (u_texture_count > 1) {\n"
-    "            vec4 second = texture2D(u_texture1,\n"
-    "                samplingUV(wrapUV(v_uv1, u_wrap1), u_sampling1));\n"
+    "            vec4 second = sampleMaterial(u_texture1, v_uv1,\n"
+    "                                         u_wrap1, u_sampling1);\n"
     "            vec4 sampleValue = mix(second, first, u_konst[3].a);\n"
     "            pixel = mix(u_registers[0], u_registers[1], sampleValue);\n"
     "        } else {\n"
@@ -333,8 +366,8 @@ static void cc_emit_tev_stage(CcShaderText *text, const CcTevKey *key, unsigned 
     cc_emit(text, "    // Original TEV stage %u.\n", index);
     if (slot < 4 && coord < 4) {
         cc_emit(text,
-                "    tex = texture2D(t%u,\n"
-                "        samplingUV(wrapUV(texUV%u, vec2(%u.0, %u.0)), sampling%u));\n",
+                "    tex = sampleMaterial(t%u, texUV%u,\n"
+                "        vec2(%u.0, %u.0), sampling%u);\n",
                 slot, coord, key->wrap_s[slot], key->wrap_t[slot], slot);
     } else {
         cc_emit(text, "    tex = vec4(1.0);\n");

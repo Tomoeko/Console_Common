@@ -53,7 +53,9 @@ endif()
 option(CC_USE_SYSTEM_VIDEO_ENCODER "Use the Apple H.264 encoder for MP4 recording"
     ${APPLE})
 find_package(Threads REQUIRED)
-add_library(console_common_audio STATIC src/audio/output.c)
+add_library(console_common_audio STATIC
+    src/audio/output.c
+    src/audio/resampler.c)
 target_compile_features(console_common_audio PUBLIC c_std_11)
 set_target_properties(console_common_audio PROPERTIES C_EXTENSIONS OFF)
 target_include_directories(console_common_audio PUBLIC
@@ -69,6 +71,9 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_libraries(console_common_audio PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
 else()
     target_sources(console_common_audio PRIVATE src/audio/output_unavailable.c)
+endif()
+if(UNIX AND NOT APPLE)
+    target_link_libraries(console_common_audio PUBLIC m)
 endif()
 if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
     target_compile_options(console_common_audio PRIVATE

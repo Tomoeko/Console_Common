@@ -25,7 +25,8 @@ typedef struct CcAudioOutputOptions {
  * renderer must overwrite every sample without allocation, I/O, or blocking.
  * Apple BUFFERED output primes three 512-frame buffers on each start; DIRECT
  * output receives the AudioUnit's variable callback sizes. Linux uses 512-frame
- * writes for both modes. Host conversion remains outside the renderer.
+ * writes for both modes. The adapter submits the requested output rate;
+ * native-source rate reconstruction belongs to the caller.
  */
 CcAudioOutput *cc_audio_output_open(const CcAudioOutputOptions *options);
 bool cc_audio_output_start(CcAudioOutput *output);

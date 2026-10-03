@@ -1,5 +1,14 @@
 get_target_property(common_root console_common SOURCE_DIR)
 
+add_executable(cc-audio-resampler-test audio/resampler_test.c)
+target_link_libraries(cc-audio-resampler-test PRIVATE console_common_audio)
+target_compile_features(cc-audio-resampler-test PRIVATE c_std_11)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(cc-audio-resampler-test PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -UNDEBUG)
+endif()
+add_test(NAME cc-audio-resampler COMMAND cc-audio-resampler-test)
+
 if(APPLE)
     add_executable(cc-audio-output-apple-test audio/output_apple_test.c)
     target_include_directories(cc-audio-output-apple-test PRIVATE
@@ -141,4 +150,24 @@ if(APPLE AND CC_USE_SYSTEM_VIDEO_ENCODER)
     endif()
     add_test(NAME cc-capture-video-apple COMMAND cc-capture-video-apple-test)
     set_tests_properties(cc-capture-video-apple PROPERTIES SKIP_RETURN_CODE 77)
+endif()
+
+# Production ES2 sampling operations run on Apple's desktop GL driver. The test
+# adapts precision declarations, then compares pixels with hardware samplers.
+if(APPLE)
+    add_executable(cc-gles2-sampling-apple-test
+        platform/gles2_sampling_apple_test.c)
+    target_include_directories(cc-gles2-sampling-apple-test PRIVATE
+        "${common_root}/tests/platform/apple_gl_compat"
+        "${common_root}/src/platform/gles2"
+        "${common_root}/src/render"
+        "${common_root}/include")
+    target_link_libraries(cc-gles2-sampling-apple-test PRIVATE "-framework OpenGL")
+    target_compile_features(cc-gles2-sampling-apple-test PRIVATE c_std_11)
+    if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(cc-gles2-sampling-apple-test PRIVATE
+            -Wall -Wextra -Wpedantic -Wconversion -Wno-deprecated-declarations -UNDEBUG)
+    endif()
+    add_test(NAME cc-gles2-sampling-apple COMMAND cc-gles2-sampling-apple-test)
+    set_tests_properties(cc-gles2-sampling-apple PROPERTIES SKIP_RETURN_CODE 77)
 endif()
