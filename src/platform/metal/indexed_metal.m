@@ -220,6 +220,24 @@ static bool reserve_draws(CcIndexedRenderer *renderer, size_t draw_count, char *
     return true;
 }
 
+static MTLCompileOptions *precise_compile_options(void) {
+    MTLCompileOptions *options = [MTLCompileOptions new];
+#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 150000
+    if (@available(macOS 15.0, *)) {
+        options.mathMode = MTLMathModeSafe;
+        options.mathFloatingPointFunctions = MTLMathFloatingPointFunctionsPrecise;
+        return options;
+    }
+#endif
+    /* Earlier macOS versions expose the same precision policy through this
+     * deprecated property. Keep the warning exception at that fallback. */
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    options.fastMathEnabled = NO;
+#pragma clang diagnostic pop
+    return options;
+}
+
 static id<MTLFunction> compile_function(id<MTLDevice> device, const char *source,
                                         const char *entry, char *error,
                                         size_t error_capacity) {
@@ -234,8 +252,7 @@ static id<MTLFunction> compile_function(id<MTLDevice> device, const char *source
         return nil;
     }
     NSError *diagnostic = nil;
-    MTLCompileOptions *options = [MTLCompileOptions new];
-    options.fastMathEnabled = NO;
+    MTLCompileOptions *options = precise_compile_options();
     id<MTLLibrary> library = [device newLibraryWithSource:text
                                                   options:options
                                                     error:&diagnostic];
