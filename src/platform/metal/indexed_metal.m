@@ -260,7 +260,8 @@ static MTLBlendFactor blend_factor(CcIndexedBlendFactor factor) {
                                              MTLBlendFactorSourceAlpha,
                                              MTLBlendFactorOneMinusSourceAlpha,
                                              MTLBlendFactorDestinationAlpha,
-                                             MTLBlendFactorOneMinusDestinationAlpha};
+                                             MTLBlendFactorOneMinusDestinationAlpha,
+                                             MTLBlendFactorBlendColor};
     return factors[factor];
 }
 
@@ -653,6 +654,10 @@ static void encode_draw(CcIndexedRenderer *renderer,
         setRenderPipelineState:depth ? objects.depthPipeline : objects.colorPipeline];
     [encoder
         setDepthStencilState:depth ? objects.depthState : objects.disabledDepthState];
+    [encoder setBlendColorRed:program->state.blend_color[0]
+                        green:program->state.blend_color[1]
+                         blue:program->state.blend_color[2]
+                        alpha:program->state.blend_color[3]];
     static const MTLCullMode culls[] = {MTLCullModeNone, MTLCullModeFront,
                                         MTLCullModeBack};
     [encoder setCullMode:culls[program->state.cull]];

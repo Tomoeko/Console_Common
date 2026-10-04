@@ -40,13 +40,18 @@ bool cc_indexed_program_validate(const CcIndexedProgramDescription *description,
     const CcIndexedState *state = &description->state;
     if ((unsigned)state->equation_rgb > CC_INDEXED_REVERSE_SUBTRACT ||
         (unsigned)state->equation_alpha > CC_INDEXED_REVERSE_SUBTRACT ||
-        (unsigned)state->source_rgb > CC_INDEXED_INVERSE_DESTINATION_ALPHA ||
-        (unsigned)state->destination_rgb > CC_INDEXED_INVERSE_DESTINATION_ALPHA ||
-        (unsigned)state->source_alpha > CC_INDEXED_INVERSE_DESTINATION_ALPHA ||
-        (unsigned)state->destination_alpha > CC_INDEXED_INVERSE_DESTINATION_ALPHA ||
+        (unsigned)state->source_rgb > CC_INDEXED_CONSTANT_COLOR ||
+        (unsigned)state->destination_rgb > CC_INDEXED_CONSTANT_COLOR ||
+        (unsigned)state->source_alpha > CC_INDEXED_CONSTANT_COLOR ||
+        (unsigned)state->destination_alpha > CC_INDEXED_CONSTANT_COLOR ||
         (unsigned)state->depth_compare > CC_INDEXED_ALWAYS ||
         (unsigned)state->cull > CC_INDEXED_CULL_BACK)
         return fail(error, error_capacity, "invalid indexed render state");
+    for (size_t lane = 0; lane < 4; ++lane) {
+        if (!isfinite(state->blend_color[lane]) || state->blend_color[lane] < 0.0f ||
+            state->blend_color[lane] > 1.0f)
+            return fail(error, error_capacity, "invalid indexed blend color");
+    }
     for (size_t index = 0; index < description->attribute_count; ++index) {
         const CcIndexedAttribute *attribute = &description->attributes[index];
         if (!attribute->name || !attribute->name[0] ||

@@ -481,11 +481,12 @@ bool cc_indexed_begin(CcIndexedRenderer *renderer, const CcIndexedFrame *frame,
 }
 
 static void apply_state(const CcIndexedState *state, bool depth_attachment) {
-    static const GLenum factors[] = {GL_ZERO,      GL_ONE,
-                                     GL_SRC_COLOR, GL_ONE_MINUS_SRC_COLOR,
-                                     GL_DST_COLOR, GL_ONE_MINUS_DST_COLOR,
-                                     GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA,
-                                     GL_DST_ALPHA, GL_ONE_MINUS_DST_ALPHA};
+    static const GLenum factors[] = {GL_ZERO,          GL_ONE,
+                                     GL_SRC_COLOR,     GL_ONE_MINUS_SRC_COLOR,
+                                     GL_DST_COLOR,     GL_ONE_MINUS_DST_COLOR,
+                                     GL_SRC_ALPHA,     GL_ONE_MINUS_SRC_ALPHA,
+                                     GL_DST_ALPHA,     GL_ONE_MINUS_DST_ALPHA,
+                                     GL_CONSTANT_COLOR};
     static const GLenum equations[] = {GL_FUNC_ADD, GL_FUNC_SUBTRACT,
                                        GL_FUNC_REVERSE_SUBTRACT};
     if (state->blend) {
@@ -495,6 +496,8 @@ static void apply_state(const CcIndexedState *state, bool depth_attachment) {
         glBlendFuncSeparate(factors[state->source_rgb], factors[state->destination_rgb],
                             factors[state->source_alpha],
                             factors[state->destination_alpha]);
+        glBlendColor(state->blend_color[0], state->blend_color[1],
+                     state->blend_color[2], state->blend_color[3]);
     } else {
         glDisable(GL_BLEND);
     }

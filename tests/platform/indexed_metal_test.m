@@ -46,7 +46,7 @@ static const char fragment_source[] =
     "    return color * image.sample(image_sampler, float2(0.5f));\n"
     "}\n";
 
-static CcIndexedProgram *create_program(CcIndexedRenderer *renderer) {
+static CcIndexedProgram *create_program(CcIndexedRenderer *renderer, bool constant) {
     CcIndexedProgramDescription description = {0};
     description.metal_vertex_source = vertex_source;
     description.metal_fragment_source = fragment_source;
@@ -69,6 +69,15 @@ static CcIndexedProgram *create_program(CcIndexedRenderer *renderer) {
     description.state.depth_compare = CC_INDEXED_LESS_EQUAL;
     for (size_t index = 0; index < 4; ++index)
         description.state.color_write[index] = true;
+    if (constant) {
+        description.state.blend = true;
+        description.state.source_rgb = CC_INDEXED_CONSTANT_COLOR;
+        description.state.destination_rgb = CC_INDEXED_SOURCE_COLOR;
+        description.state.source_alpha = CC_INDEXED_ONE;
+        description.state.destination_alpha = CC_INDEXED_ZERO;
+        for (size_t index = 0; index < 4; ++index)
+            description.state.blend_color[index] = (float)(index + 1) * 0.25f;
+    }
     char error[256];
     CcIndexedProgram *program =
         cc_indexed_program_create(renderer, &description, error, sizeof(error));
@@ -117,7 +126,7 @@ static void release_order_test(CcIndexedRenderer *renderer) {
     CcIndexedMesh *meshes[3];
     CcIndexedTexture *textures[3];
     for (size_t index = 0; index < 3; ++index) {
-        programs[index] = create_program(renderer);
+        programs[index] = create_program(renderer, false);
         meshes[index] = create_mesh(renderer, index != 0);
         textures[index] = create_texture(renderer);
     }
@@ -143,7 +152,8 @@ int main(void) {
     REQUIRE(renderer);
     REQUIRE(cc_indexed_reserve(renderer, 2, error, sizeof(error)));
     release_order_test(renderer);
-    CcIndexedProgram *program = create_program(renderer);
+    CcIndexedProgram *program = create_program(renderer, false);
+    CcIndexedProgram *constant_program = create_program(renderer, true);
     CcIndexedMesh *mesh = create_mesh(renderer, true);
     CcIndexedMesh *immutable = create_mesh(renderer, false);
     CcIndexedTexture *texture = create_texture(renderer);
@@ -197,13 +207,17 @@ int main(void) {
         draw.first_index = 1;
         REQUIRE(!cc_indexed_draw(renderer, &draw, NULL, 0));
         draw.first_index = 0;
+        draw.program = constant_program;
         REQUIRE(cc_indexed_draw(renderer, &draw, error, sizeof(error)));
         REQUIRE(!cc_indexed_draw(renderer, &draw, NULL, 0));
         REQUIRE(cc_indexed_end(renderer, error, sizeof(error)));
+        draw.program = program;
     }
     /* Last native commands remain in flight. Releasing the C handles must
      * retain their encoded native objects until those commands complete. */
     REQUIRE(cc_indexed_program_release(renderer, &program, error, sizeof(error)));
+    REQUIRE(
+        cc_indexed_program_release(renderer, &constant_program, error, sizeof(error)));
     REQUIRE(cc_indexed_mesh_release(renderer, &mesh, error, sizeof(error)));
     REQUIRE(cc_indexed_mesh_release(renderer, &immutable, error, sizeof(error)));
     REQUIRE(cc_indexed_texture_release(renderer, &texture, error, sizeof(error)));

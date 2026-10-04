@@ -38,7 +38,8 @@ typedef enum CcIndexedBlendFactor {
     CC_INDEXED_SOURCE_ALPHA,
     CC_INDEXED_INVERSE_SOURCE_ALPHA,
     CC_INDEXED_DESTINATION_ALPHA,
-    CC_INDEXED_INVERSE_DESTINATION_ALPHA
+    CC_INDEXED_INVERSE_DESTINATION_ALPHA,
+    CC_INDEXED_CONSTANT_COLOR
 } CcIndexedBlendFactor;
 
 typedef enum CcIndexedBlendEquation {
@@ -67,6 +68,9 @@ typedef struct CcIndexedState {
     CcIndexedCull cull;
     bool counterclockwise_front;
     bool color_write[4];
+    /* Retained normalized RGBA for CONSTANT_COLOR. Backends publish this
+     * explicit value at drawing; program creation never infers it. */
+    float blend_color[4];
 } CcIndexedState;
 
 typedef struct CcIndexedAttribute {
