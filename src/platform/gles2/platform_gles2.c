@@ -10,7 +10,11 @@
 #include "texture_dimensions.h"
 #include "../framebuffer.h"
 
+#ifdef _WIN32
+#include "../windows/gl_api.h"
+#else
 #include <GLES2/gl2.h>
+#endif
 
 #include <stddef.h>
 #include <math.h>

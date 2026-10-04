@@ -4,7 +4,11 @@
 #include "console_common/platform/platform.h"
 #include "material.h"
 
+#ifdef _WIN32
+#include "../windows/gl_api.h"
+#else
 #include <GLES2/gl2.h>
+#endif
 
 #include <stdbool.h>
 #include <stdint.h>

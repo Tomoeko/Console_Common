@@ -7,6 +7,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _WIN32
+#define CC_SHADER_PRECISION ""
+#else
+#define CC_SHADER_PRECISION "precision CC_UV_PRECISION float;\n"
+#endif
+
 /* Folded NPOT coordinates still need the opposite edge's linear-filter taps.
  * Interior samples and clamp/mirror modes keep one texture lookup. */
 #define CC_MATERIAL_SAMPLING_SOURCE                                                    \
@@ -80,14 +86,13 @@ static const char *const cc_vertex_source =
     "}\n";
 
 static const char *const cc_fragment_source =
-    "precision CC_UV_PRECISION float;\n"
-    "uniform sampler2D u_texture;\n"
-    "varying CC_UV_PRECISION vec2 v_uv;\n"
-    "varying lowp vec4 v_color;\n"
-    "\n"
-    "void main() {\n"
-    "    gl_FragColor = texture2D(u_texture, v_uv) * v_color;\n"
-    "}\n";
+    CC_SHADER_PRECISION "uniform sampler2D u_texture;\n"
+                        "varying CC_UV_PRECISION vec2 v_uv;\n"
+                        "varying lowp vec4 v_color;\n"
+                        "\n"
+                        "void main() {\n"
+                        "    gl_FragColor = texture2D(u_texture, v_uv) * v_color;\n"
+                        "}\n";
 
 static const char *const cc_material_vertex_source =
     "attribute vec4 a_position;\n"
@@ -135,8 +140,7 @@ static const char *const cc_tev_vertex_source =
     "    texUV3 = a_uv3;\n"
     "}\n";
 
-static const char *const cc_material_fragment_source =
-    "precision CC_UV_PRECISION float;\n"
+static const char *const cc_material_fragment_source = CC_SHADER_PRECISION
     "uniform sampler2D u_texture0;\n"
     "uniform sampler2D u_texture1;\n"
     "uniform int u_texture_count;\n"
@@ -422,22 +426,21 @@ static void cc_alpha_condition(char output[96], uint8_t kind, uint8_t reference)
 
 static char *cc_tev_fragment_source(const CcTevKey *key) {
     CcShaderText text = {0};
-    cc_emit(&text, "precision CC_UV_PRECISION float;\n"
-                   "uniform sampler2D t0;\n"
-                   "uniform sampler2D t1;\n"
-                   "uniform sampler2D t2;\n"
-                   "uniform sampler2D t3;\n"
-                   "uniform vec4 sampling0;\n"
-                   "uniform vec4 sampling1;\n"
-                   "uniform vec4 sampling2;\n"
-                   "uniform vec4 sampling3;\n"
-                   "uniform vec4 regs[3];\n"
-                   "uniform vec4 kc[4];\n"
-                   "varying CC_UV_PRECISION vec4 raster;\n"
-                   "varying CC_UV_PRECISION vec2 texUV0;\n"
-                   "varying CC_UV_PRECISION vec2 texUV1;\n"
-                   "varying CC_UV_PRECISION vec2 texUV2;\n"
-                   "varying CC_UV_PRECISION vec2 texUV3;\n");
+    cc_emit(&text, CC_SHADER_PRECISION "uniform sampler2D t0;\n"
+                                       "uniform sampler2D t1;\n"
+                                       "uniform sampler2D t2;\n"
+                                       "uniform sampler2D t3;\n"
+                                       "uniform vec4 sampling0;\n"
+                                       "uniform vec4 sampling1;\n"
+                                       "uniform vec4 sampling2;\n"
+                                       "uniform vec4 sampling3;\n"
+                                       "uniform vec4 regs[3];\n"
+                                       "uniform vec4 kc[4];\n"
+                                       "varying CC_UV_PRECISION vec4 raster;\n"
+                                       "varying CC_UV_PRECISION vec2 texUV0;\n"
+                                       "varying CC_UV_PRECISION vec2 texUV1;\n"
+                                       "varying CC_UV_PRECISION vec2 texUV2;\n"
+                                       "varying CC_UV_PRECISION vec2 texUV3;\n");
     cc_emit(&text, "%s", CC_MATERIAL_SAMPLING_SOURCE);
     cc_emit(&text, "vec3 tevColor8(vec3 value) {\n"
                    "    return mod(floor(value * 255.0 + 0.5), 256.0);\n"
@@ -487,8 +490,14 @@ static GLuint cc_compile_shader(GLenum type, const char *source,
         fprintf(stderr, "GLES2: could not allocate a shader.\n");
         return 0;
     }
+#ifdef _WIN32
+    const GLchar *parts[] = {"#version 120\n#define highp\n#define mediump\n"
+                             "#define lowp\n",
+                             precision_directive, source};
+#else
     const GLchar *parts[] = {precision_directive, source};
-    glShaderSource(shader, 2, parts, NULL);
+#endif
+    glShaderSource(shader, (GLsizei)(sizeof(parts) / sizeof(parts[0])), parts, NULL);
     glCompileShader(shader);
     glGetShaderiv(shader, GL_COMPILE_STATUS, &compiled);
     if (compiled == GL_TRUE) {

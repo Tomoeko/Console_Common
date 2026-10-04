@@ -4,12 +4,16 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <stdint.h>
 
 bool cc_texture_source_url_valid(const char *url, size_t *length);
 
 /* Opens a regular .wmra file below an already-open asset directory. Every
  * relative component is opened without following symlinks. The caller owns
  * the returned stream and must close it. */
-FILE *cc_texture_source_open(int root_directory, const char *url, size_t url_length);
+intptr_t cc_texture_source_root_open(const char *path);
+void cc_texture_source_root_close(intptr_t root_directory);
+FILE *cc_texture_source_open(intptr_t root_directory, const char *url,
+                             size_t url_length);
 
 #endif

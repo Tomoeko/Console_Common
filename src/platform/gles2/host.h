@@ -3,8 +3,8 @@
 
 #include "console_common/platform/platform.h"
 
-/* X11 and EGL stay behind this private interface. The host owns the native
- * window and current ES2 context; the renderer owns every GL object. */
+/* Native windowing and context management stay behind this interface. The
+ * calling render thread owns the current context and every GL object. */
 typedef struct CcGles2Host CcGles2Host;
 
 CcGles2Host *cc_gles2_host_create(const char *title, int width, int height);

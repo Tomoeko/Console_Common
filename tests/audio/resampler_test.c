@@ -87,7 +87,7 @@ static void passthrough_and_empty(void) {
 }
 
 static void chunk_identity_and_reset(unsigned output_rate) {
-    const size_t source_count = 503;
+    enum { source_count = 503 };
     float samples[source_count * 2];
     for (size_t index = 0; index < source_count * 2; ++index)
         samples[index] = (float)((int)(index * 7919 % 60001) - 30000) / 32768;

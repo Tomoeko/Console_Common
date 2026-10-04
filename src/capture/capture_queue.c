@@ -4,7 +4,7 @@
 #include "console_common/capture/capture_writer.h"
 
 #include <errno.h>
-#include <pthread.h>
+#include "console_common/support/thread.h"
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,9 +26,9 @@ typedef struct {
 
 struct CcCaptureQueue {
     CcCaptureWriter *writer;
-    pthread_t worker;
-    pthread_mutex_t mutex;
-    pthread_cond_t condition;
+    CcThread worker;
+    CcMutex mutex;
+    CcCondition condition;
     CaptureJob jobs[CAPTURE_QUEUE_JOBS];
     uint8_t *video_storage;
     float *audio_storage;
@@ -53,7 +53,7 @@ static bool fail_queue(CcCaptureQueue *queue, const char *message) {
                                             memory_order_release, memory_order_relaxed);
     atomic_store_explicit(&queue->failed, true, memory_order_release);
     if (queue->condition_ready)
-        pthread_cond_broadcast(&queue->condition);
+        cc_condition_broadcast(&queue->condition);
     return false;
 }
 
@@ -77,15 +77,15 @@ static bool append_job(CcCaptureQueue *queue, const CaptureJob *job, unsigned in
 static void *writer_worker(void *context) {
     CcCaptureQueue *queue = context;
     bool writing = true;
-    if (pthread_mutex_lock(&queue->mutex) != 0) {
+    if (cc_mutex_lock(&queue->mutex) != 0) {
         fail_queue(queue, "Cannot lock the recording worker.");
         return NULL;
     }
     for (;;) {
         while (!queue->count && !queue->stopping) {
-            if (pthread_cond_wait(&queue->condition, &queue->mutex) != 0) {
+            if (cc_condition_wait(&queue->condition, &queue->mutex) != 0) {
                 fail_queue(queue, "Cannot wait for recording jobs.");
-                pthread_mutex_unlock(&queue->mutex);
+                cc_mutex_unlock(&queue->mutex);
                 return NULL;
             }
         }
@@ -93,7 +93,7 @@ static void *writer_worker(void *context) {
             break;
         unsigned index = queue->read;
         CaptureJob job = queue->jobs[index];
-        if (pthread_mutex_unlock(&queue->mutex) != 0) {
+        if (cc_mutex_unlock(&queue->mutex) != 0) {
             fail_queue(queue, "Cannot unlock the recording worker.");
             return NULL;
         }
@@ -102,7 +102,7 @@ static void *writer_worker(void *context) {
             const char *reason = cc_capture_writer_error(queue->writer);
             fail_queue(queue, reason[0] ? reason : "Recording writer rejected a job.");
         }
-        if (pthread_mutex_lock(&queue->mutex) != 0) {
+        if (cc_mutex_lock(&queue->mutex) != 0) {
             fail_queue(queue, "Cannot lock the recording worker.");
             return NULL;
         }
@@ -110,19 +110,19 @@ static void *writer_worker(void *context) {
             queue->video_busy[job.video_slot] = false;
         queue->read = (queue->read + 1) % CAPTURE_QUEUE_JOBS;
         queue->count--;
-        if (pthread_cond_broadcast(&queue->condition) != 0)
+        if (cc_condition_broadcast(&queue->condition) != 0)
             fail_queue(queue, "Cannot notify the recording producer.");
     }
-    if (pthread_mutex_unlock(&queue->mutex) != 0)
+    if (cc_mutex_unlock(&queue->mutex) != 0)
         fail_queue(queue, "Cannot unlock the recording worker.");
     return NULL;
 }
 
 static void release_queue(CcCaptureQueue *queue) {
     if (queue->condition_ready)
-        pthread_cond_destroy(&queue->condition);
+        cc_condition_destroy(&queue->condition);
     if (queue->mutex_ready)
-        pthread_mutex_destroy(&queue->mutex);
+        cc_mutex_destroy(&queue->mutex);
     free(queue->audio_storage);
     free(queue->video_storage);
     free(queue);
@@ -156,17 +156,17 @@ CcCaptureQueue *cc_capture_queue_open_with_audio(const char *path, unsigned widt
                                   CAPTURE_QUEUE_AUDIO_FRAMES * 2 * sizeof(float));
     if (!queue->video_storage || !queue->audio_storage)
         goto release_failed;
-    if (pthread_mutex_init(&queue->mutex, NULL) != 0)
+    if (cc_mutex_init(&queue->mutex) != 0)
         goto release_failed;
     queue->mutex_ready = true;
-    if (pthread_cond_init(&queue->condition, NULL) != 0)
+    if (cc_condition_init(&queue->condition) != 0)
         goto release_failed;
     queue->condition_ready = true;
     queue->writer = cc_capture_writer_open_with_audio(
         path, width, height, video_timescale, audio_rate, audio_mode);
     if (!queue->writer)
         goto release_failed;
-    if (pthread_create(&queue->worker, NULL, writer_worker, queue) != 0)
+    if (cc_thread_start(&queue->worker, writer_worker, queue) != 0)
         goto release_failed;
     queue->worker_ready = true;
     return queue;
@@ -194,7 +194,7 @@ static unsigned available_video_slot(const CcCaptureQueue *queue) {
 }
 
 static bool wait_deadline(struct timespec *deadline) {
-    if (clock_gettime(CLOCK_REALTIME, deadline) != 0 || deadline->tv_sec < 0 ||
+    if (timespec_get(deadline, TIME_UTC) != TIME_UTC || deadline->tv_sec < 0 ||
         (uintmax_t)deadline->tv_sec == UINTMAX_MAX)
         return false;
     time_t next_second = (time_t)((uintmax_t)deadline->tv_sec + 1);
@@ -206,7 +206,7 @@ static bool wait_deadline(struct timespec *deadline) {
 
 static bool reserve_job(CcCaptureQueue *queue, bool video, unsigned *job_index,
                         unsigned *frame_index) {
-    if (pthread_mutex_lock(&queue->mutex) != 0)
+    if (cc_mutex_lock(&queue->mutex) != 0)
         return fail_queue(queue, "Cannot lock the recording queue.");
     const char *reason = "Recording is closing or has failed.";
     bool waiting = false;
@@ -232,7 +232,7 @@ static bool reserve_job(CcCaptureQueue *queue, bool video, unsigned *job_index,
         }
         waiting = true;
         int status =
-            pthread_cond_timedwait(&queue->condition, &queue->mutex, &deadline);
+            cc_condition_timedwait(&queue->condition, &queue->mutex, &deadline);
         if (status == ETIMEDOUT) {
             bool available =
                 queue->count < CAPTURE_QUEUE_JOBS &&
@@ -245,7 +245,7 @@ static bool reserve_job(CcCaptureQueue *queue, bool video, unsigned *job_index,
         }
     }
     *job_index = queue->write;
-    if (pthread_mutex_unlock(&queue->mutex) != 0) {
+    if (cc_mutex_unlock(&queue->mutex) != 0) {
         okay = false;
         reason = "Cannot unlock the recording queue.";
     }
@@ -255,18 +255,18 @@ static bool reserve_job(CcCaptureQueue *queue, bool video, unsigned *job_index,
 }
 
 static bool publish_job(CcCaptureQueue *queue, unsigned index, CaptureJob job) {
-    if (pthread_mutex_lock(&queue->mutex) != 0)
+    if (cc_mutex_lock(&queue->mutex) != 0)
         return fail_queue(queue, "Cannot lock the recording queue.");
     bool okay = !queue->stopping && !cc_capture_queue_failed(queue);
     if (okay) {
         queue->jobs[index] = job;
         queue->write = (queue->write + 1) % CAPTURE_QUEUE_JOBS;
         queue->count++;
-        if (pthread_cond_signal(&queue->condition) != 0)
+        if (cc_condition_signal(&queue->condition) != 0)
             okay = false;
     } else if (job.video)
         queue->video_busy[job.video_slot] = false;
-    if (pthread_mutex_unlock(&queue->mutex) != 0)
+    if (cc_mutex_unlock(&queue->mutex) != 0)
         okay = false;
     if (!okay)
         return fail_queue(queue, "Cannot publish a recording job.");
@@ -326,18 +326,18 @@ bool cc_capture_queue_close(CcCaptureQueue *queue) {
     if (!queue)
         return true;
     bool success = true;
-    if (pthread_mutex_lock(&queue->mutex) != 0)
+    if (cc_mutex_lock(&queue->mutex) != 0)
         success = fail_queue(queue, "Cannot lock the recording queue during close.");
     else {
         queue->stopping = true;
-        if (pthread_cond_signal(&queue->condition) != 0)
+        if (cc_condition_signal(&queue->condition) != 0)
             success =
                 fail_queue(queue, "Cannot wake the recording worker during close.");
-        if (pthread_mutex_unlock(&queue->mutex) != 0)
+        if (cc_mutex_unlock(&queue->mutex) != 0)
             success =
                 fail_queue(queue, "Cannot unlock the recording queue during close.");
     }
-    if (queue->worker_ready && pthread_join(queue->worker, NULL) != 0)
+    if (queue->worker_ready && cc_thread_join(queue->worker) != 0)
         return fail_queue(queue, "Cannot join the recording worker.");
     if (!cc_capture_writer_close(queue->writer) || cc_capture_queue_failed(queue))
         success = false;

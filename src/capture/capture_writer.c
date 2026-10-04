@@ -1,3 +1,4 @@
+#include "console_common/support/host.h"
 #define _POSIX_C_SOURCE 200809L
 #ifndef _FILE_OFFSET_BITS
 #define _FILE_OFFSET_BITS 64
@@ -270,7 +271,11 @@ CcCaptureWriter *cc_capture_writer_open_with_audio(const char *path, unsigned wi
             video_config.codec != CC_CAPTURE_VIDEO_H264)
             goto release_writer;
     }
+#ifdef _WIN32
+    writer->file = cc_host_fopen(path, "wbx");
+#else
     writer->file = fopen(path, "wbx");
+#endif
     if (!writer->file)
         goto release_writer;
     write_file_header(writer);

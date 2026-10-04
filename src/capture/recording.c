@@ -2,6 +2,7 @@
 
 #include "console_common/capture/recording.h"
 #include "console_common/capture/capture_queue.h"
+#include "console_common/support/host.h"
 
 #include <errno.h>
 #include <math.h>
@@ -10,7 +11,11 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
+#ifdef _WIN32
+#include "platform/windows/file_util.h"
+#else
 #include <unistd.h>
+#endif
 
 enum { RECORDING_TIMESCALE = 1000000, RECORDING_AUDIO_BLOCK = 4096 };
 
@@ -208,34 +213,56 @@ release_capture:
 }
 
 static char *movies_path(const char *prefix) {
-    const char *user_home = getenv("HOME");
-    if (!user_home || !*user_home || strlen(user_home) > SIZE_MAX - strlen(prefix) - 80)
+    char *movies = cc_host_movies_directory();
+    if (!movies)
         return NULL;
-    size_t capacity = strlen(user_home) + strlen(prefix) + 80;
+    if (strlen(movies) > SIZE_MAX - strlen(prefix) - 80) {
+        free(movies);
+        return NULL;
+    }
+    size_t capacity = strlen(movies) + strlen(prefix) + 80;
     char *path = malloc(capacity);
-    if (!path)
+    if (!path) {
+        free(movies);
         return NULL;
-    int count = snprintf(path, capacity, "%s/Movies", user_home);
+    }
+    int count = snprintf(path, capacity, "%s", movies);
+#ifdef _WIN32
+    if (count < 0 || (size_t)count >= capacity || !cc_windows_create_directory(path))
+#else
     struct stat directory;
     if (count < 0 || (size_t)count >= capacity ||
         (mkdir(path, 0700) != 0 && errno != EEXIST) || stat(path, &directory) != 0 ||
         !S_ISDIR(directory.st_mode))
+#endif
         goto release_path;
     time_t now = time(NULL);
     struct tm date;
     char stamp[24];
+#ifdef _WIN32
+    if (gmtime_s(&date, &now) != 0 ||
+#else
     if (!gmtime_r(&now, &date) ||
+#endif
         !strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", &date))
         goto release_path;
     for (unsigned suffix = 0; suffix < 10000; ++suffix) {
-        count = snprintf(path, capacity, "%s/Movies/%s-%s-%04u.mp4", user_home, prefix,
-                         stamp, suffix);
+        count = snprintf(path, capacity, "%s/%s-%s-%04u.mp4", movies, prefix, stamp,
+                         suffix);
         if (count < 0 || (size_t)count >= capacity)
             break;
-        if (lstat(path, &directory) != 0 && errno == ENOENT)
+#ifdef _WIN32
+        bool missing = cc_windows_path_missing(path);
+#else
+        bool missing = lstat(path, &directory) != 0 && errno == ENOENT;
+#endif
+        if (missing) {
+            free(movies);
             return path;
+        }
     }
 release_path:
+    free(movies);
     free(path);
     return NULL;
 }

@@ -3,10 +3,12 @@
 
 #include "texture_source.h"
 
-#include <fcntl.h>
 #include <string.h>
+#ifndef _WIN32
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#endif
 
 enum { CC_MAX_URL_LENGTH = 1024 };
 
@@ -41,14 +43,31 @@ bool cc_texture_source_url_valid(const char *url, size_t *length) {
     return true;
 }
 
-FILE *cc_texture_source_open(int root_directory, const char *url, size_t url_length) {
+#ifndef _WIN32
+intptr_t cc_texture_source_root_open(const char *path) {
+    int descriptor = open(path, O_RDONLY | O_CLOEXEC | O_DIRECTORY);
+    struct stat information;
+    if (descriptor >= 0 && fstat(descriptor, &information) == 0 &&
+        S_ISDIR(information.st_mode))
+        return descriptor;
+    if (descriptor >= 0)
+        close(descriptor);
+    return -1;
+}
+
+void cc_texture_source_root_close(intptr_t root_directory) {
+    close((int)root_directory);
+}
+
+FILE *cc_texture_source_open(intptr_t root_directory, const char *url,
+                             size_t url_length) {
     size_t checked_length;
     if (root_directory < 0 || !cc_texture_source_url_valid(url, &checked_length) ||
         checked_length != url_length) {
         return NULL;
     }
 
-    int directory = root_directory;
+    int directory = (int)root_directory;
     bool close_directory = false;
     size_t segment_start = 0;
     for (size_t index = 0; index <= url_length; ++index) {
@@ -96,3 +115,4 @@ FILE *cc_texture_source_open(int root_directory, const char *url, size_t url_len
     }
     return NULL;
 }
+#endif

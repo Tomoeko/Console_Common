@@ -1,3 +1,4 @@
+#include "console_common/support/host.h"
 #include "console_common/support/json.h"
 
 #include <ctype.h>
@@ -234,7 +235,7 @@ bool cc_json_parse(CcJson *json, const char *source, size_t length) {
 
 bool cc_json_load(CcJson *json, const char *path, size_t max_bytes) {
     memset(json, 0, sizeof(*json));
-    FILE *file = fopen(path, "rb");
+    FILE *file = cc_host_fopen(path, "rb");
     if (!file)
         return false;
     if (fseek(file, 0, SEEK_END) != 0) {

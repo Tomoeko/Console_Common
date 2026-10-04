@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.20)
 
 project(ConsoleCommon VERSION 0.1.0 LANGUAGES C)
+if(MSVC)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    add_compile_options(/experimental:c11atomics /Zc:preprocessor /fp:strict)
+endif()
 
 # Default projection remains compatible; consumers choose their dimensions.
 set(CC_FRAME_WIDTH 640 CACHE STRING "Logical framebuffer width")
@@ -26,17 +30,43 @@ add_library(console_common STATIC
     src/render/viewport.c
     src/resources/gx_texture.c
     src/resources/resource_tpl.c
-    src/support/atomic_file.c
+    src/support/directory.c
+    src/support/display_settings.c
     src/support/error.c
+    src/support/host.c
     src/support/json.c
-    src/support/regular_file.c
+    src/support/process.c
     src/support/sha1.c
+    src/support/tool_random.c
     src/support/utf8.c
 )
+if(WIN32)
+    target_sources(console_common PRIVATE
+        src/platform/windows/file_util.c
+        src/platform/windows/regular_file_windows.c
+        src/platform/windows/atomic_file_windows.c
+        src/platform/windows/tool_file.c
+        src/platform/windows/tool_directory.c
+        src/platform/windows/tool_metadata.c
+        src/platform/windows/tool_path.c
+        src/platform/windows/texture_source_windows.c)
+    target_link_libraries(console_common PUBLIC shell32 ole32 uuid advapi32 bcrypt)
+    target_compile_definitions(console_common PUBLIC WIN32_LEAN_AND_MEAN NOMINMAX
+        UNICODE _UNICODE _CRT_SECURE_NO_WARNINGS)
+    if(MSVC)
+        target_compile_options(console_common PUBLIC /utf-8)
+        target_link_options(console_common INTERFACE /MANIFEST:EMBED
+            "/MANIFESTINPUT:${CMAKE_CURRENT_SOURCE_DIR}/src/platform/windows/application.manifest")
+    endif()
+else()
+    target_sources(console_common PRIVATE
+        src/support/atomic_file.c src/support/regular_file.c)
+endif()
 target_compile_features(console_common PUBLIC c_std_11)
 set_target_properties(console_common PROPERTIES C_EXTENSIONS OFF)
 target_include_directories(console_common PUBLIC
-    "${CMAKE_CURRENT_SOURCE_DIR}/include")
+    "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_compile_definitions(console_common PUBLIC
     CC_FRAME_WIDTH=${CC_FRAME_WIDTH}
     CC_FRAME_HEIGHT=${CC_FRAME_HEIGHT}
@@ -69,6 +99,10 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_sources(console_common_audio PRIVATE
         src/platform/linux/audio_output_linux.c)
     target_link_libraries(console_common_audio PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
+elseif(WIN32)
+    target_sources(console_common_audio PRIVATE
+        src/platform/windows/audio_output_windows.c)
+    target_link_libraries(console_common_audio PRIVATE winmm avrt)
 else()
     target_sources(console_common_audio PRIVATE src/audio/output_unavailable.c)
 endif()
@@ -144,17 +178,25 @@ macro(cc_add_platform target backend)
         if(APPLE)
             message(FATAL_ERROR "The macOS SDK has no OpenGL ES 2.0 runtime; use Metal.")
         endif()
-        find_package(X11 REQUIRED)
-        find_library(CC_EGL_LIBRARY EGL REQUIRED)
-        find_library(CC_GLES2_LIBRARY GLESv2 REQUIRED)
         target_sources(${target} PRIVATE
             "${common_root}/src/platform/gles2/platform_gles2.c"
             "${common_root}/src/platform/gles2/retained_frame.c"
-            "${common_root}/src/platform/gles2/host.c"
             "${common_root}/src/platform/gles2/shaders.c"
             "${common_root}/src/platform/gles2/texture_dimensions.c")
-        target_link_libraries(${target} PRIVATE
-            X11::X11 ${CC_EGL_LIBRARY} ${CC_GLES2_LIBRARY} m)
+        if(WIN32)
+            target_sources(${target} PRIVATE
+                "${common_root}/src/platform/windows/host_windows.c"
+                "${common_root}/src/platform/windows/window.c"
+                "${common_root}/src/platform/windows/gl_api.c")
+            target_link_libraries(${target} PRIVATE user32 gdi32 opengl32 winmm)
+        else()
+            find_package(X11 REQUIRED)
+            find_library(CC_EGL_LIBRARY EGL REQUIRED)
+            find_library(CC_GLES2_LIBRARY GLESv2 REQUIRED)
+            target_sources(${target} PRIVATE "${common_root}/src/platform/gles2/host.c")
+            target_link_libraries(${target} PRIVATE
+                X11::X11 ${CC_EGL_LIBRARY} ${CC_GLES2_LIBRARY} m)
+        endif()
     else()
         message(FATAL_ERROR "Graphics backend must be metal or gles2.")
     endif()

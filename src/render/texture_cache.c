@@ -8,13 +8,10 @@
 #include "image_internal.h"
 #include "texture_source.h"
 
-#include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
 enum { CC_MAX_TEXTURE_SOURCES = 8192 };
 
@@ -35,7 +32,7 @@ typedef struct CcTextureEntry {
 
 struct CcTextureCache {
     CcPlatform *platform;
-    int raw_root_directory;
+    intptr_t raw_root_directory;
     CcTextureEntry *entries;
     size_t entry_count;
     size_t entry_capacity;
@@ -136,18 +133,13 @@ CcTextureCache *cc_texture_cache_create(CcPlatform *platform, const char *raw_ro
     if (!platform || !raw_root || !raw_root[0] || budget_bytes == 0) {
         return NULL;
     }
-    int root_directory = open(raw_root, O_RDONLY | O_CLOEXEC | O_DIRECTORY);
+    intptr_t root_directory = cc_texture_source_root_open(raw_root);
     if (root_directory < 0) {
-        return NULL;
-    }
-    struct stat information;
-    if (fstat(root_directory, &information) != 0 || !S_ISDIR(information.st_mode)) {
-        close(root_directory);
         return NULL;
     }
     CcTextureCache *cache = calloc(1, sizeof(*cache));
     if (!cache) {
-        close(root_directory);
+        cc_texture_source_root_close(root_directory);
         return NULL;
     }
     cache->platform = platform;
@@ -169,7 +161,7 @@ void cc_texture_cache_destroy(CcTextureCache *cache) {
         free(entry->url);
     }
     free(cache->entries);
-    close(cache->raw_root_directory);
+    cc_texture_source_root_close(cache->raw_root_directory);
     free(cache);
 }
 

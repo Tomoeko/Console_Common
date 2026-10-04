@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "capture/capture_jpeg.h"
+#include "console_common/support/host.h"
 
 #include <assert.h>
 #include <limits.h>
@@ -169,19 +170,19 @@ static void test_frame(const char *directory, unsigned width, unsigned height) {
         size_t total = 0;
         for (unsigned frame = 1; frame <= frames; ++frame) {
             fill_image(rgba, width, height, stride, frame);
-            assert(clock_gettime(CLOCK_MONOTONIC, &first) == 0);
+            assert(cc_host_time(&first));
             assert(cc_capture_jpeg_encode(encoder, rgba, stride, &sample, &size));
-            assert(clock_gettime(CLOCK_MONOTONIC, &last) == 0);
+            assert(cc_host_time(&last));
             elapsed += elapsed_seconds(first, last);
             total += size;
         }
         printf("JPEG %ux%u: %.3f ms/frame, %zu bytes/frame, %.2f MiB/s at60Hz\n", width,
                height, elapsed * 1000 / frames, total / frames,
                (double)total / frames * 60 / (1024 * 1024));
-        assert(clock_gettime(CLOCK_MONOTONIC, &first) == 0);
+        assert(cc_host_time(&first));
         for (unsigned frame = 0; frame < 120; ++frame)
             assert(cc_capture_jpeg_encode(encoder, rgba, stride, &sample, &size));
-        assert(clock_gettime(CLOCK_MONOTONIC, &last) == 0);
+        assert(cc_host_time(&last));
         printf("JPEG %ux%u repeated frame: %.3f ms/frame\n", width, height,
                elapsed_seconds(first, last) * 1000 / 120);
     }

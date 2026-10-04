@@ -1,4 +1,65 @@
+find_package(Threads REQUIRED)
 get_target_property(common_root console_common SOURCE_DIR)
+if(MSVC)
+    add_compile_options(/UNDEBUG)
+endif()
+
+if(WIN32)
+    foreach(module window audio_order audio_output tool_io)
+        add_executable(cc-windows-${module}-test platform/windows/${module}_test.c)
+        target_include_directories(cc-windows-${module}-test PRIVATE "${common_root}/src")
+        target_link_libraries(cc-windows-${module}-test PRIVATE console_common
+            user32 gdi32 winmm avrt)
+        add_test(NAME cc-windows-${module} COMMAND cc-windows-${module}-test)
+        set_tests_properties(cc-windows-${module} PROPERTIES TIMEOUT 15)
+    endforeach()
+endif()
+
+add_executable(cc-process-test support/process_test.c)
+target_link_libraries(cc-process-test PRIVATE console_common)
+if(NOT MSVC)
+    target_compile_options(cc-process-test PRIVATE -UNDEBUG)
+endif()
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tests/process with spaces")
+add_test(NAME cc-process COMMAND cc-process-test
+    "${CMAKE_BINARY_DIR}/tests/process with spaces")
+set_tests_properties(cc-process PROPERTIES TIMEOUT 10)
+
+find_package(Python3 QUIET COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME cc-build-changes COMMAND "${Python3_EXECUTABLE}"
+        "${common_root}/tests/support/build_changes_test.py")
+    set_tests_properties(cc-build-changes PROPERTIES
+        ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+endif()
+
+add_executable(cc-thread-test support/thread_test.c)
+target_link_libraries(cc-thread-test PRIVATE console_common Threads::Threads)
+if(NOT MSVC)
+    target_compile_options(cc-thread-test PRIVATE -UNDEBUG)
+endif()
+add_test(NAME cc-thread COMMAND cc-thread-test)
+set_tests_properties(cc-thread PROPERTIES TIMEOUT 10)
+
+add_executable(cc-directory-test support/directory_test.c)
+target_include_directories(cc-directory-test PRIVATE "${common_root}/src")
+target_link_libraries(cc-directory-test PRIVATE console_common)
+if(NOT MSVC)
+    target_compile_options(cc-directory-test PRIVATE -UNDEBUG)
+endif()
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tests/directory")
+add_test(NAME cc-directory COMMAND cc-directory-test
+    "${CMAKE_BINARY_DIR}/tests/directory")
+
+add_executable(cc-display-settings-test support/display_settings_test.c)
+target_include_directories(cc-display-settings-test PRIVATE "${common_root}/src")
+target_link_libraries(cc-display-settings-test PRIVATE console_common)
+if(NOT MSVC)
+    target_compile_options(cc-display-settings-test PRIVATE -UNDEBUG)
+endif()
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tests/display-settings")
+add_test(NAME cc-display-settings COMMAND cc-display-settings-test
+    "${CMAKE_BINARY_DIR}/tests/display-settings")
 
 add_executable(cc-audio-resampler-test audio/resampler_test.c)
 target_link_libraries(cc-audio-resampler-test PRIVATE console_common_audio)
@@ -85,6 +146,9 @@ foreach(test_name
     support/ascii
     support/portable_path
     viewport)
+    if(WIN32 AND test_name MATCHES "^(render/(image_atomic|texture_source)|support/regular_file)$")
+        continue()
+    endif()
     string(REPLACE "/" "-" target_name "cc-${test_name}")
     add_executable(${target_name}-test "${test_name}_test.c")
     target_link_libraries(${target_name}-test PRIVATE console_common)
@@ -125,6 +189,9 @@ endif()
 add_test(NAME cc-texture-dimensions COMMAND cc-texture-dimensions-test)
 
 foreach(module writer writer_io queue jpeg recording recording_half audio_buffer)
+    if(WIN32 AND module MATCHES "^(writer_io|queue|recording|recording_half|audio_buffer)$")
+        continue()
+    endif()
     string(REPLACE "_" "-" test_label "${module}")
     set(test_target "cc-capture-${test_label}-test")
     set(output_directory "${CMAKE_BINARY_DIR}/tests/capture-${test_label}")

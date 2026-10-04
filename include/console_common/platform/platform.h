@@ -32,7 +32,8 @@ typedef enum CcEventType {
     CC_EVENT_POINTER_LEAVE,
     CC_EVENT_KEY_DOWN,
     CC_EVENT_KEY_MODIFIERS,
-    CC_EVENT_KEY_UP
+    CC_EVENT_KEY_UP,
+    CC_EVENT_WINDOW_RESIZED
 } CcEventType;
 
 typedef enum CcKey {

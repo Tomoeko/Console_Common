@@ -3,7 +3,11 @@
 
 #include "frame_damage.h"
 
+#ifdef _WIN32
+#include "../windows/gl_api.h"
+#else
 #include <GLES2/gl2.h>
+#endif
 
 typedef struct CcGles2RetainedFrame {
     CcFrameDamage *commands;
