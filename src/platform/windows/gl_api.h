@@ -12,7 +12,15 @@ typedef ptrdiff_t GLintptr;
 
 #define GL_CLAMP_TO_EDGE 0x812F
 #define GL_ARRAY_BUFFER 0x8892
+#define GL_ELEMENT_ARRAY_BUFFER 0x8893
 #define GL_STREAM_DRAW 0x88E0
+#define GL_STATIC_DRAW 0x88E4
+#define GL_DYNAMIC_DRAW 0x88E8
+#define GL_MIRRORED_REPEAT 0x8370
+#define GL_CONSTANT_COLOR 0x8001
+#define GL_FUNC_ADD 0x8006
+#define GL_FUNC_SUBTRACT 0x800A
+#define GL_FUNC_REVERSE_SUBTRACT 0x800B
 #define GL_VERTEX_SHADER 0x8B31
 #define GL_FRAGMENT_SHADER 0x8B30
 #define GL_COMPILE_STATUS 0x8B81
@@ -37,6 +45,8 @@ typedef ptrdiff_t GLintptr;
     X(void, BindBuffer, (GLenum target, GLuint buffer))                                \
     X(void, BindFramebuffer, (GLenum target, GLuint framebuffer))                      \
     X(void, BindRenderbuffer, (GLenum target, GLuint renderbuffer))                    \
+    X(void, BlendColor, (GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha))     \
+    X(void, BlendEquationSeparate, (GLenum rgb, GLenum alpha))                         \
     X(void, BlendFuncSeparate,                                                         \
       (GLenum source_rgb, GLenum destination_rgb, GLenum source_alpha,                 \
        GLenum destination_alpha))                                                      \
@@ -102,6 +112,8 @@ bool cc_windows_gl_load(void);
 #define glBindBuffer cc_windows_gl.BindBuffer
 #define glBindFramebuffer cc_windows_gl.BindFramebuffer
 #define glBindRenderbuffer cc_windows_gl.BindRenderbuffer
+#define glBlendColor cc_windows_gl.BlendColor
+#define glBlendEquationSeparate cc_windows_gl.BlendEquationSeparate
 #define glBlendFuncSeparate cc_windows_gl.BlendFuncSeparate
 #define glBufferData cc_windows_gl.BufferData
 #define glBufferSubData cc_windows_gl.BufferSubData

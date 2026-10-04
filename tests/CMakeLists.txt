@@ -130,12 +130,14 @@ if(UNIX)
 endif()
 
 foreach(test_name
+    audio/description
     platform/framebuffer
     render/clip
     render/render_geometry
     render/material
     render/material_blend
     render/image_atomic
+    render/indexed
     render/texture_source
     resources/gx_texture
     support/endian
@@ -163,6 +165,15 @@ foreach(test_name
         WORKING_DIRECTORY "${PROJECT_BINARY_DIR}")
 endforeach()
 
+add_executable(cc-audio-test platform/audio_test.c)
+target_link_libraries(cc-audio-test PRIVATE console_common_audio)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(cc-audio-test PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion)
+endif()
+add_test(NAME cc-audio COMMAND cc-audio-test)
+set_tests_properties(cc-audio PROPERTIES SKIP_RETURN_CODE 77)
+
 if(APPLE)
     enable_language(OBJC)
     add_executable(cc-metal-pipeline-test platform/metal_pipeline_test.m)
@@ -174,6 +185,12 @@ if(APPLE)
     target_compile_options(cc-metal-pipeline-test PRIVATE -UNDEBUG)
     add_test(NAME cc-metal-pipeline COMMAND cc-metal-pipeline-test)
     set_tests_properties(cc-metal-pipeline PROPERTIES SKIP_RETURN_CODE 77)
+    add_executable(cc-indexed-metal-test platform/indexed_metal_test.m)
+    cc_add_platform(cc-indexed-metal-test metal)
+    set_source_files_properties(platform/indexed_metal_test.m
+        PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+    add_test(NAME cc-indexed-metal COMMAND cc-indexed-metal-test)
+    set_tests_properties(cc-indexed-metal PROPERTIES SKIP_RETURN_CODE 77)
 endif()
 
 # Texture metadata is independent of a graphics context and is tested on every host.

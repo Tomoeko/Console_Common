@@ -17,7 +17,7 @@
 @implementation CcMetalState
 @end
 
-static CcMetalState *cc_state(CcPlatform *platform) {
+CcMetalState *cc_metal_platform_state(CcPlatform *platform) {
     return platform ? (__bridge CcMetalState *)platform->metal_state : nil;
 }
 
@@ -132,7 +132,7 @@ static bool cc_antialias_targets(CcMetalState *state, NSUInteger slot, NSUIntege
 }
 
 bool cc_platform_set_antialiasing(CcPlatform *platform, bool enabled) {
-    CcMetalState *state = cc_state(platform);
+    CcMetalState *state = cc_metal_platform_state(platform);
     if (!state)
         return false;
     if (!enabled) {
@@ -241,7 +241,7 @@ void cc_release_metal(CcMetalState *state) {
 }
 
 void cc_platform_begin(CcPlatform *platform, CcColor clear_color) {
-    CcMetalState *state = cc_state(platform);
+    CcMetalState *state = cc_metal_platform_state(platform);
     if (!state) {
         return;
     }
@@ -271,7 +271,7 @@ void cc_platform_begin(CcPlatform *platform, CcColor clear_color) {
 }
 
 void cc_platform_set_clip(CcPlatform *platform, const CcClipRect *rect) {
-    CcMetalState *state = cc_state(platform);
+    CcMetalState *state = cc_metal_platform_state(platform);
     if (!state)
         return;
     state->clip_enabled = rect != NULL;
@@ -407,7 +407,7 @@ void cc_platform_draw_quad(CcPlatform *platform, const CcQuad *quad) {
 
 void cc_platform_draw_vertices(CcPlatform *platform, const CcDrawVertex corners[4],
                                uint32_t texture_handle) {
-    CcMetalState *state = cc_state(platform);
+    CcMetalState *state = cc_metal_platform_state(platform);
     if (!state || !corners) {
         return;
     }
@@ -439,7 +439,7 @@ static bool cc_metal_tev_supported(CcMetalState *state, const CcMaterialQuad *qu
 }
 
 void cc_platform_draw_material_quad(CcPlatform *platform, const CcMaterialQuad *quad) {
-    CcMetalState *state = cc_state(platform);
+    CcMetalState *state = cc_metal_platform_state(platform);
     if (!state || !quad || quad->texture_count > CC_MATERIAL_TEXTURES) {
         return;
     }
@@ -517,7 +517,7 @@ void cc_platform_draw_material_quad(CcPlatform *platform, const CcMaterialQuad *
 }
 
 void cc_platform_prepare_material(CcPlatform *platform, const CcMaterialQuad *quad) {
-    CcMetalState *state = cc_state(platform);
+    CcMetalState *state = cc_metal_platform_state(platform);
     CcMaterialBlend blend;
     unsigned depth_key;
     if (!state || !quad || quad->texture_count > CC_MATERIAL_TEXTURES ||
@@ -733,7 +733,7 @@ static bool cc_encode_capture_presentation(CcMetalState *state,
 }
 
 void cc_platform_end(CcPlatform *platform) {
-    CcMetalState *state = cc_state(platform);
+    CcMetalState *state = cc_metal_platform_state(platform);
     if (state && !state->render_target_handle)
         state->capture_ready = false;
     if (!state || (!state->render_target_handle && !state->capture_texture &&
@@ -880,7 +880,7 @@ bool cc_platform_capture_begin(CcPlatform *platform, CcFramebuffer *frame) {
     if (!frame)
         return false;
     *frame = (CcFramebuffer){0};
-    CcMetalState *state = cc_state(platform);
+    CcMetalState *state = cc_metal_platform_state(platform);
     if (!state || state->capture_texture || !state->view)
         return false;
     NSSize size = [state->view convertSizeToBacking:state->view.bounds.size];
@@ -927,7 +927,7 @@ bool cc_platform_capture_frame(CcPlatform *platform, CcFramebuffer *frame) {
     if (!frame)
         return false;
     *frame = (CcFramebuffer){0};
-    CcMetalState *state = cc_state(platform);
+    CcMetalState *state = cc_metal_platform_state(platform);
     if (!state || !state->capture_ready)
         return false;
     *frame = (CcFramebuffer){state->capture_rgba, state->capture_width,
@@ -936,7 +936,7 @@ bool cc_platform_capture_frame(CcPlatform *platform, CcFramebuffer *frame) {
 }
 
 void cc_platform_capture_end(CcPlatform *platform) {
-    CcMetalState *state = cc_state(platform);
+    CcMetalState *state = cc_metal_platform_state(platform);
     if (!state)
         return;
     cc_wait_for_metal(state);
@@ -957,7 +957,7 @@ void cc_platform_set_fade_alpha(CcPlatform *platform, float alpha) {
 }
 
 uint32_t cc_platform_create_render_texture(CcPlatform *platform) {
-    CcMetalState *state = cc_state(platform);
+    CcMetalState *state = cc_metal_platform_state(platform);
     if (!state ||
         (state->free_texture_handles.count == 0 && state->textures.count >= UINT32_MAX))
         return 0;
@@ -976,7 +976,7 @@ uint32_t cc_platform_create_render_texture(CcPlatform *platform) {
 
 bool cc_platform_begin_target(CcPlatform *platform, uint32_t texture,
                               CcColor clear_color) {
-    CcMetalState *state = cc_state(platform);
+    CcMetalState *state = cc_metal_platform_state(platform);
     if (!state || texture == 0 || (NSUInteger)texture >= state->textures.count) {
         return false;
     }
@@ -997,7 +997,7 @@ bool cc_platform_begin_target(CcPlatform *platform, uint32_t texture,
 
 uint32_t cc_platform_create_texture(CcPlatform *platform, int width, int height,
                                     const uint8_t *rgba) {
-    CcMetalState *state = cc_state(platform);
+    CcMetalState *state = cc_metal_platform_state(platform);
     if (!state || (state->free_texture_handles.count == 0 &&
                    state->textures.count >= UINT32_MAX)) {
         return 0;
@@ -1012,7 +1012,7 @@ uint32_t cc_platform_create_texture(CcPlatform *platform, int width, int height,
 }
 
 void cc_platform_destroy_texture(CcPlatform *platform, uint32_t texture) {
-    CcMetalState *state = cc_state(platform);
+    CcMetalState *state = cc_metal_platform_state(platform);
     if (!state || texture == 0 || (NSUInteger)texture >= state->textures.count) {
         return;
     }

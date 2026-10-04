@@ -184,6 +184,8 @@ id<MTLRenderPipelineState>
 cc_metal_material_pipeline(CcMetalState *state, CcBatchKind kind, uint8_t blend_key);
 
 bool cc_prepare_metal(CcMetalState *state);
+/* Borrow the existing native device/window boundary for generic indexed draws. */
+CcMetalState *cc_metal_platform_state(CcPlatform *platform);
 void cc_wait_for_metal(CcMetalState *state);
 void cc_release_metal(CcMetalState *state);
 

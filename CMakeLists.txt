@@ -18,11 +18,13 @@ foreach(value CC_FRAME_WIDTH CC_FRAME_HEIGHT CC_ASPECT_WIDTH CC_ASPECT_HEIGHT)
 endforeach()
 
 add_library(console_common STATIC
+    src/audio/audio.c
     src/capture/audio_buffer.c
     src/platform/framebuffer.c
     src/render/clip.c
     src/render/frame_damage.c
     src/render/image.c
+    src/render/indexed.c
     src/render/material.c
     src/render/material_blend.c
     src/render/texture_cache.c
@@ -76,6 +78,7 @@ if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
     target_compile_options(console_common PRIVATE
         -Wall -Wextra -Wpedantic -Wconversion)
 endif()
+
 if(UNIX AND NOT APPLE)
     target_link_libraries(console_common PUBLIC m)
 endif()
@@ -91,20 +94,29 @@ set_target_properties(console_common_audio PROPERTIES C_EXTENSIONS OFF)
 target_include_directories(console_common_audio PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/include"
     PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_link_libraries(console_common_audio PUBLIC console_common)
 if(APPLE)
     target_sources(console_common_audio PRIVATE
-        src/platform/apple/audio_output_apple.c)
-    target_link_libraries(console_common_audio PRIVATE "-framework AudioToolbox")
+        src/platform/apple/audio_output_apple.c
+        src/platform/audio/audio_coreaudio.c)
+    target_link_libraries(console_common_audio PRIVATE
+        "-framework AudioToolbox"
+        "-framework CoreAudio"
+        "-framework CoreFoundation")
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_sources(console_common_audio PRIVATE
-        src/platform/linux/audio_output_linux.c)
+        src/platform/linux/audio_output_linux.c
+        src/platform/audio/audio_unsupported.c)
     target_link_libraries(console_common_audio PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
 elseif(WIN32)
     target_sources(console_common_audio PRIVATE
-        src/platform/windows/audio_output_windows.c)
+        src/platform/windows/audio_output_windows.c
+        src/platform/audio/audio_unsupported.c)
     target_link_libraries(console_common_audio PRIVATE winmm avrt)
 else()
-    target_sources(console_common_audio PRIVATE src/audio/output_unavailable.c)
+    target_sources(console_common_audio PRIVATE
+        src/audio/output_unavailable.c
+        src/platform/audio/audio_unsupported.c)
 endif()
 if(UNIX AND NOT APPLE)
     target_link_libraries(console_common_audio PUBLIC m)
@@ -160,11 +172,13 @@ macro(cc_add_platform target backend)
         enable_language(OBJC)
         target_sources(${target} PRIVATE
             "${common_root}/src/platform/metal/platform_metal.m"
+            "${common_root}/src/platform/metal/indexed_metal.m"
             "${common_root}/src/platform/metal/pipeline.m"
             "${common_root}/src/platform/metal/platform_metal_window.m"
             "${common_root}/src/platform/metal/shaders.m")
         set_source_files_properties(
             "${common_root}/src/platform/metal/platform_metal.m"
+            "${common_root}/src/platform/metal/indexed_metal.m"
             "${common_root}/src/platform/metal/pipeline.m"
             "${common_root}/src/platform/metal/platform_metal_window.m"
             "${common_root}/src/platform/metal/shaders.m"
@@ -180,6 +194,7 @@ macro(cc_add_platform target backend)
         endif()
         target_sources(${target} PRIVATE
             "${common_root}/src/platform/gles2/platform_gles2.c"
+            "${common_root}/src/platform/gles2/indexed_gles2.c"
             "${common_root}/src/platform/gles2/retained_frame.c"
             "${common_root}/src/platform/gles2/shaders.c"
             "${common_root}/src/platform/gles2/texture_dimensions.c")
