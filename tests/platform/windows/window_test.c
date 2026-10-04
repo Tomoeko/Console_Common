@@ -5,6 +5,17 @@
 static HANDLE paint_entered;
 static HANDLE paint_release;
 static volatile LONG block_paint;
+static DWORD cursor_test_thread;
+static HCURSOR cursor_requested;
+static unsigned cursor_requests;
+
+static HCURSOR WINAPI test_set_cursor(HCURSOR cursor) {
+    if (GetCurrentThreadId() != cursor_test_thread)
+        return SetCursor(cursor);
+    cursor_requested = cursor;
+    ++cursor_requests;
+    return NULL;
+}
 
 static HDC WINAPI test_begin_paint(HWND window, LPPAINTSTRUCT paint) {
     if (InterlockedExchange(&block_paint, 0)) {
@@ -15,8 +26,10 @@ static HDC WINAPI test_begin_paint(HWND window, LPPAINTSTRUCT paint) {
 }
 
 #define BeginPaint test_begin_paint
+#define SetCursor test_set_cursor
 #include "platform/windows/window.c"
 #undef BeginPaint
+#undef SetCursor
 
 static void wait_visible(CcWindowsWindow *window) {
     for (unsigned attempt = 0; attempt < 100 && !IsWindowVisible(window->window);
@@ -25,7 +38,23 @@ static void wait_visible(CcWindowsWindow *window) {
     assert(IsWindowVisible(window->window));
 }
 
+static void test_client_cursor(CcWindowsWindow *window) {
+    cursor_requested = LoadCursorW(NULL, IDC_ARROW);
+    unsigned previous_requests = cursor_requests;
+    assert(window_message(window->window, WM_SETCURSOR, (WPARAM)window->window,
+                          MAKELPARAM(HTCLIENT, WM_MOUSEMOVE)) == TRUE);
+    assert(cursor_requests == previous_requests + 1 && cursor_requested == NULL);
+    window_message(window->window, WM_SETCURSOR, (WPARAM)window->window,
+                   MAKELPARAM(HTCAPTION, WM_MOUSEMOVE));
+    window_message(window->window, WM_SETCURSOR, (WPARAM)window->window,
+                   MAKELPARAM(HTLEFT, WM_MOUSEMOVE));
+    assert(cursor_requests == previous_requests + 1);
+    assert((HCURSOR)GetClassLongPtrW(window->window, GCLP_HCURSOR) ==
+           LoadCursorW(NULL, IDC_ARROW));
+}
+
 int main(void) {
+    cursor_test_thread = GetCurrentThreadId();
     paint_entered = CreateEventW(NULL, TRUE, FALSE, NULL);
     paint_release = CreateEventW(NULL, TRUE, FALSE, NULL);
     assert(paint_entered && paint_release);
@@ -33,11 +62,13 @@ int main(void) {
     assert(window);
     cc_windows_window_show(window);
     wait_visible(window);
+    test_client_cursor(window);
     RECT original;
     assert(GetWindowRect(window->window, &original));
     for (unsigned cycle = 0; cycle < 3; ++cycle) {
         assert(cc_windows_window_set_fullscreen(window, true));
         assert(cc_windows_window_is_fullscreen(window));
+        test_client_cursor(window);
         assert(IsWindowVisible(window->window));
         assert(!(GetWindowLongPtrW(window->window, GWL_STYLE) & WS_OVERLAPPEDWINDOW));
         MONITORINFO monitor = {.cbSize = sizeof(monitor)};
@@ -52,6 +83,7 @@ int main(void) {
         assert(height == bounds.bottom - bounds.top);
         assert(cc_windows_window_set_fullscreen(window, false));
         assert(!cc_windows_window_is_fullscreen(window));
+        test_client_cursor(window);
         assert(IsWindowVisible(window->window));
         assert(GetWindowRect(window->window, &bounds));
         assert(EqualRect(&bounds, &original));
@@ -78,6 +110,7 @@ int main(void) {
     cc_windows_window_close(window);
     CloseHandle(paint_entered);
     CloseHandle(paint_release);
-    puts("Windows fullscreen, resize and message-thread isolation passed.");
+    puts("Windows fullscreen, client cursor, resize and message-thread isolation "
+         "passed.");
     return 0;
 }

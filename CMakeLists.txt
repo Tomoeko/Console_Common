@@ -21,6 +21,7 @@ add_library(console_common STATIC
     src/audio/audio.c
     src/capture/audio_buffer.c
     src/platform/framebuffer.c
+    src/platform/window_controls.c
     src/render/clip.c
     src/render/frame_damage.c
     src/render/image.c

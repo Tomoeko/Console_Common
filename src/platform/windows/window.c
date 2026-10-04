@@ -151,6 +151,12 @@ static LRESULT CALLBACK window_message(HWND window, UINT message, WPARAM first,
             return 0;
         case WM_ERASEBKGND:
             return 1;
+        case WM_SETCURSOR:
+            if (LOWORD(second) == HTCLIENT) {
+                SetCursor(NULL);
+                return TRUE;
+            }
+            return DefWindowProcW(window, message, first, second);
         case WM_SIZE:
             EnterCriticalSection(&host->mutex);
             host->width = LOWORD(second);

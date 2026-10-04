@@ -132,6 +132,7 @@ endif()
 foreach(test_name
     audio/description
     platform/framebuffer
+    platform/window_controls
     render/clip
     render/render_geometry
     render/material
