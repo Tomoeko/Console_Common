@@ -171,3 +171,23 @@ if(APPLE)
     add_test(NAME cc-gles2-sampling-apple COMMAND cc-gles2-sampling-apple-test)
     set_tests_properties(cc-gles2-sampling-apple PROPERTIES SKIP_RETURN_CODE 77)
 endif()
+
+if(APPLE)
+    add_executable(cc-gles2-tev-precision-apple-test
+        platform/gles2_tev_precision_apple_test.m)
+    target_include_directories(cc-gles2-tev-precision-apple-test PRIVATE
+        "${common_root}/tests/platform/apple_gl_compat"
+        "${common_root}/src/platform/gles2"
+        "${common_root}/src/render"
+        "${common_root}/include")
+    target_link_libraries(cc-gles2-tev-precision-apple-test PRIVATE
+        "-framework OpenGL" "-framework Metal" "-framework Foundation")
+    if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(cc-gles2-tev-precision-apple-test PRIVATE
+            -Wall -Wextra -Wpedantic -Wconversion -Wno-deprecated-declarations
+            -UNDEBUG -fobjc-arc)
+    endif()
+    add_test(NAME cc-gles2-tev-precision-apple
+        COMMAND cc-gles2-tev-precision-apple-test)
+    set_tests_properties(cc-gles2-tev-precision-apple PROPERTIES SKIP_RETURN_CODE 77)
+endif()

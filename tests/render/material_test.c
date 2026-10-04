@@ -55,10 +55,7 @@ static void test_fragment_precision(void) {
         quad.tev_stages[5][6] = (uint8_t)operation;
         CcMaterialQuad before = quad;
         assert(cc_material_tev_support(&quad, true) == CC_TEV_SUPPORTED);
-        CcTevSupport expected = operation == 12 || operation == 13
-                                    ? CC_TEV_PRECISION_LIMIT
-                                    : CC_TEV_SUPPORTED;
-        assert(cc_material_tev_support(&quad, false) == expected);
+        assert(cc_material_tev_support(&quad, false) == CC_TEV_SUPPORTED);
         assert(memcmp(&quad, &before, sizeof(quad)) == 0);
     }
 }

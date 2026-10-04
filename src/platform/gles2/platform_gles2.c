@@ -59,7 +59,6 @@ struct CcPlatform {
     CcTevProgram *tev_programs;
     bool fragment_highp;
     bool warned_tev_limit;
-    bool warned_tev_precision;
     bool warned_tev_encoding;
     GLuint vertex_buffer;
     GLuint white_texture;
@@ -759,10 +758,6 @@ static bool cc_tev_supported(CcPlatform *platform, const CcMaterialQuad *quad) {
         fprintf(stderr, "GLES2: materials with over six TEV stages use the "
                         "simple material fallback.\n");
         platform->warned_tev_limit = true;
-    } else if (support == CC_TEV_PRECISION_LIMIT && !platform->warned_tev_precision) {
-        fprintf(stderr, "GLES2: 24-bit TEV comparisons require "
-                        "fragment highp; using the simple fallback.\n");
-        platform->warned_tev_precision = true;
     } else if (support == CC_TEV_INVALID_ENCODING && !platform->warned_tev_encoding) {
         fprintf(stderr, "GLES2: invalid TEV selector encoding uses the "
                         "simple material fallback.\n");

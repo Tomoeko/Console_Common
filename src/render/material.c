@@ -10,14 +10,7 @@ CcTevSupport cc_material_tev_support(const CcMaterialQuad *quad, bool fragment_h
     if (quad->tev_stage_count > CC_RENDER_TEV_STAGES) {
         return CC_TEV_STAGE_LIMIT;
     }
-    if (!fragment_highp) {
-        for (unsigned stage = 0; stage < quad->tev_stage_count; ++stage) {
-            unsigned operation = quad->tev_stages[stage][6] & 15;
-            if (operation == 12 || operation == 13) {
-                return CC_TEV_PRECISION_LIMIT;
-            }
-        }
-    }
+    (void)fragment_highp;
     if (quad->has_alpha_compare &&
         ((quad->alpha_compare[0] & 15) > 7 || (quad->alpha_compare[0] >> 4) > 7 ||
          quad->alpha_compare[1] > 3)) {

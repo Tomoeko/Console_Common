@@ -4,6 +4,7 @@
 #endif
 
 #include <assert.h>
+#include <errno.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -58,6 +59,55 @@ static void verify_completed_prefix(const char *path, uint64_t media_end) {
     assert(fseek(file, 0, SEEK_END) == 0 &&
            (uint64_t)ftell(file) == media_end + length);
     assert(fclose(file) == 0);
+}
+
+static void test_header_failure(const char *path) {
+    for (int write_index = 0; write_index < 9; ++write_index) {
+        remove(path);
+        writes_before_failure = write_index;
+        zero_failed_write = write_index % 2 == 0;
+        CcCaptureWriter *writer = cc_capture_writer_open(path, 1, 1, 60, 48000);
+        assert(!writer);
+        errno = 0;
+        FILE *file = fopen(path, "rb");
+        assert(!file && errno == ENOENT);
+    }
+    FILE *file = fopen(path, "wb");
+    assert(file && fputs("Existing recording", file) >= 0 && fclose(file) == 0);
+    writes_before_failure = 0;
+    assert(!cc_capture_writer_open(path, 1, 1, 60, 48000));
+    assert(writes_before_failure == 0);
+    writes_before_failure = -1;
+    file = fopen(path, "rb");
+    char contents[32] = {0};
+    assert(file && fread(contents, 1, sizeof(contents), file) == 18);
+    assert(!strcmp(contents, "Existing recording") && fclose(file) == 0);
+    remove(path);
+}
+
+static void test_encoded_audio_failure(const char *path, bool during_finish) {
+    if (!cc_capture_audio_mode_supported(CC_CAPTURE_AUDIO_WEB))
+        return;
+    remove(path);
+    CcCaptureWriter *writer = cc_capture_writer_open_with_audio(
+        path, 64, 64, 60000, 48000, CC_CAPTURE_AUDIO_WEB);
+    assert(writer);
+    float stereo[8192 * 2] = {0};
+    assert(cc_capture_writer_audio(writer, stereo, 8192));
+    assert(writer->audio.count &&
+           writer->audio.duration > writer->audio_config.priming_frames);
+    uint64_t completed = writer->complete_position;
+    size_t packets = writer->audio.count;
+    writes_before_failure = 0;
+    zero_failed_write = false;
+    if (!during_finish) {
+        assert(!cc_capture_writer_audio(writer, stereo, 8192));
+        assert(writer->audio.count == packets &&
+               writer->complete_position == completed);
+    }
+    assert(!cc_capture_writer_close(writer));
+    assert(writes_before_failure == -1);
+    verify_completed_prefix(path, completed);
 }
 
 static void test_append_failure(const char *path, unsigned mode) {
@@ -137,6 +187,9 @@ int main(int argc, char **argv) {
     char path[1024];
     int length = snprintf(path, sizeof(path), "%s/capture-io-prefix.mp4", argv[1]);
     assert(length > 0 && (size_t)length < sizeof(path));
+    test_header_failure(path);
+    test_encoded_audio_failure(path, false);
+    test_encoded_audio_failure(path, true);
     for (unsigned mode = 0; mode < 3; ++mode)
         test_append_failure(path, mode);
     test_index_allocation_failure(path, true);

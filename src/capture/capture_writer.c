@@ -279,8 +279,12 @@ CcCaptureWriter *cc_capture_writer_open_with_audio(const char *path, unsigned wi
     return writer;
 
 release_writer:
-    if (writer->file)
+    if (writer->file) {
         fclose(writer->file);
+        /* Exclusive creation means this failed header cannot belong to an
+         * existing recording. No caller can finalize an unsuccessful open. */
+        remove(path);
+    }
     cc_capture_video_close(writer->encoder);
     cc_capture_audio_close(writer->audio_encoder);
     free(writer);

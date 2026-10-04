@@ -13,8 +13,8 @@ typedef enum CcTevSupport {
     CC_TEV_INVALID_ENCODING
 } CcTevSupport;
 
-/* Keep material selection shared. ES 2.0 fragment mediump cannot represent
- * the packed 24-bit comparisons; Metal and fragment highp can. */
+/* Packed comparisons use byte components, independent of fragment precision.
+ * Keep the precision argument compatible with existing backend consumers. */
 CcTevSupport cc_material_tev_support(const CcMaterialQuad *quad, bool fragment_highp);
 
 #endif

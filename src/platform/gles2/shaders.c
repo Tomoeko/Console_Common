@@ -289,25 +289,40 @@ static void cc_emit_color_operation(CcShaderText *text, unsigned index,
                 "comparison%u.y ? cc%u.y : 0.0, "
                 "comparison%u.z ? cc%u.z : 0.0);\n",
                 index, index, index, index, index, index, index, index);
-    } else if (kind >= 8) {
-        char packed_a[128];
-        char packed_b[128];
-        if (kind < 10) {
-            snprintf(packed_a, sizeof(packed_a), "tevColor8(ca%u).r", index);
-            snprintf(packed_b, sizeof(packed_b), "tevColor8(cb%u).r", index);
-        } else if (kind < 12) {
-            snprintf(packed_a, sizeof(packed_a),
-                     "dot(tevColor8(ca%u).rg, vec2(1.0, 256.0))", index);
-            snprintf(packed_b, sizeof(packed_b),
-                     "dot(tevColor8(cb%u).rg, vec2(1.0, 256.0))", index);
+    } else if (kind >= 10) {
+        /* Keep packed comparisons exact without storing a 16/24-bit float. */
+        cc_emit(text,
+                "    vec3 qa%u = tevColor8(ca%u);\n"
+                "    vec3 qb%u = tevColor8(cb%u);\n",
+                index, index, index, index);
+        if (kind & 1) {
+            cc_emit(text,
+                    "    bool comparison%u = qa%u.x == qb%u.x && "
+                    "qa%u.y == qb%u.y;\n",
+                    index, index, index, index, index);
+            if (kind >= 12) {
+                cc_emit(text, "    comparison%u = comparison%u && qa%u.z == qb%u.z;\n",
+                        index, index, index, index);
+            }
         } else {
-            snprintf(packed_a, sizeof(packed_a),
-                     "dot(tevColor8(ca%u), vec3(1.0, 256.0, 65536.0))", index);
-            snprintf(packed_b, sizeof(packed_b),
-                     "dot(tevColor8(cb%u), vec3(1.0, 256.0, 65536.0))", index);
+            cc_emit(text,
+                    "    bool comparison%u = qa%u.y > qb%u.y || "
+                    "(qa%u.y == qb%u.y && qa%u.x > qb%u.x);\n",
+                    index, index, index, index, index, index, index);
+            if (kind >= 12) {
+                cc_emit(text,
+                        "    comparison%u = qa%u.z > qb%u.z || "
+                        "(qa%u.z == qb%u.z && comparison%u);\n",
+                        index, index, index, index, index, index);
+            }
         }
-        cc_emit(text, "    c%u = cd%u + ((%s %s %s) ? cc%u : vec3(0.0));\n", index,
-                index, packed_a, compare, packed_b, index);
+        cc_emit(text, "    c%u = cd%u + (comparison%u ? cc%u : vec3(0.0));\n", index,
+                index, index, index);
+    } else if (kind >= 8) {
+        cc_emit(text,
+                "    c%u = cd%u + ((tevColor8(ca%u).r %s tevColor8(cb%u).r) "
+                "? cc%u : vec3(0.0));\n",
+                index, index, index, compare, index, index);
     } else {
         static const char *const bias[4] = {"0.0", "0.5", "-0.5", "0.0"};
         static const char *const scale[4] = {"1.0", "2.0", "4.0", "0.5"};

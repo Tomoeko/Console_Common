@@ -443,6 +443,40 @@ static void test_composed_alpha(CcPlatform *platform, CcMetalState *state) {
     cc_platform_capture_end(platform);
 }
 
+static void test_translucent_clear(CcPlatform *platform, CcMetalState *state) {
+    [state->view setFrameSize:NSMakeSize(80, 60)];
+    CcFramebuffer frame = {0};
+    assert(cc_platform_capture_begin(platform, &frame));
+    const float alphas[] = {0.0f, 0.25f, 0.5f, 1.0f};
+    for (unsigned enabled = 0; enabled < 2; ++enabled) {
+        assert(cc_platform_set_antialiasing(platform, enabled != 0));
+        for (unsigned index = 0; index < sizeof(alphas) / sizeof(alphas[0]); ++index) {
+            cc_platform_begin(platform, (CcColor){0.25f, 0.5f, 0.75f, alphas[index]});
+            cc_platform_end(platform);
+            assert(cc_platform_capture_frame(platform, &frame));
+            const uint8_t *pixel = frame.rgba +
+                                   (size_t)(frame.height / 2) * frame.stride +
+                                   (size_t)(frame.width / 2) * 4;
+            const uint8_t expected[] = {64, 128, 191,
+                                        (uint8_t)lroundf(alphas[index] * 255)};
+            for (unsigned channel = 0; channel < 4; ++channel) {
+                if (abs((int)pixel[channel] - (int)expected[channel]) > 1)
+                    fprintf(stderr,
+                            "Clear alpha=%g antialias=%u channel=%u: "
+                            "expected=%u actual=%u\n",
+                            (double)alphas[index], enabled, channel, expected[channel],
+                            pixel[channel]);
+                assert(abs((int)pixel[channel] - (int)expected[channel]) <= 1);
+            }
+            CcViewport content = cc_viewport_fit(frame.width, frame.height);
+            if (content.x > 0 || content.y > 0)
+                assert_capture_pixel(&frame, 0, 0, 0, 0, 0);
+        }
+    }
+    assert(cc_platform_set_antialiasing(platform, false));
+    cc_platform_capture_end(platform);
+}
+
 static void test_antialiasing(CcPlatform *platform, CcMetalState *state) {
     assert(!cc_platform_set_antialiasing(NULL, true));
     assert(cc_platform_set_antialiasing(platform, false));
@@ -541,6 +575,7 @@ int main(void) {
         test_antialiasing(&platform, state);
         test_texture_sample_coverage(&platform, state);
         test_composed_alpha(&platform, state);
+        test_translucent_clear(&platform, state);
         cc_wait_for_metal(state);
         cc_release_metal(state);
     }

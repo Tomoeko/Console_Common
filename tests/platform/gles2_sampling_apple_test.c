@@ -179,6 +179,55 @@ static void compare_sampling(GLuint reference, unsigned width, unsigned height,
     glDeleteProgram(program);
 }
 
+static void test_packed_comparison(void) {
+    static const uint8_t colors[][6] = {
+        {1, 128, 0, 0, 128, 0},     {0, 128, 0, 1, 128, 0},
+        {1, 255, 0, 0, 255, 0},     {255, 127, 0, 0, 128, 0},
+        {0, 128, 0, 255, 127, 0},   {255, 255, 0, 255, 255, 0},
+        {0, 0, 0, 0, 0, 255},       {255, 0, 0, 0, 1, 255},
+        {255, 255, 127, 0, 0, 128}, {0, 0, 128, 255, 255, 127},
+        {1, 128, 255, 0, 128, 255}, {0, 128, 255, 1, 128, 255}};
+    CcTevKey key = {.stage_count = 1};
+    memset(key.swap, 0xe4, sizeof(key.swap));
+    key.stages[0][4] = 0x42;
+    key.stages[0][5] = 0xfc;
+    key.stages[0][7] = 1;
+    key.stages[0][8] = 0x77;
+    key.stages[0][9] = 0x67;
+    key.stages[0][11] = 1;
+    for (unsigned operation = 10; operation <= 13; ++operation) {
+        key.stages[0][6] = (uint8_t)operation;
+        char *source = cc_tev_fragment_source(&key);
+        assert(source);
+        GLuint program = make_program(source);
+        free(source);
+        glUseProgram(program);
+        for (unsigned sample = 0; sample < sizeof(colors) / sizeof(colors[0]);
+             ++sample) {
+            const uint8_t *color = colors[sample];
+            float registers[12] = {0};
+            for (unsigned channel = 0; channel < 3; ++channel) {
+                registers[channel] = (float)color[channel] / 255;
+                registers[channel + 4] = (float)color[channel + 3] / 255;
+            }
+            glUniform4fv(glGetUniformLocation(program, "regs"), 3, registers);
+            uint8_t actual[4];
+            draw_pixel(program, 0, 0, actual);
+            unsigned left = (unsigned)color[0] + 256u * color[1];
+            unsigned right = (unsigned)color[3] + 256u * color[4];
+            if (operation >= 12) {
+                left += 65536u * color[2];
+                right += 65536u * color[5];
+            }
+            uint8_t expected = (operation & 1 ? left == right : left > right) ? 255 : 0;
+            for (unsigned channel = 0; channel < 3; ++channel)
+                assert(actual[channel] == expected);
+            assert(actual[3] == 255);
+        }
+        glDeleteProgram(program);
+    }
+}
+
 int main(void) {
     CGLPixelFormatAttribute attributes[] = {kCGLPFAAccelerated, kCGLPFAColorSize, 24,
                                             (CGLPixelFormatAttribute)0};
@@ -235,6 +284,7 @@ int main(void) {
         }
         glDeleteTextures(1, &texture);
     }
+    test_packed_comparison();
     glDeleteProgram(reference);
     glDeleteFramebuffers(1, &framebuffer);
     glDeleteTextures(1, &output);

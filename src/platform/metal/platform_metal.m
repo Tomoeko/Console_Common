@@ -254,16 +254,20 @@ void cc_platform_begin(CcPlatform *platform, CcColor clear_color) {
      * discards those draws before their texture handles become reusable. */
     cc_release_retired_textures(state);
     state->clip_enabled = false;
-    CcQuad background = {.x = 0,
-                         .y = 0,
-                         .width = CC_FRAME_WIDTH,
-                         .height = CC_FRAME_HEIGHT,
-                         .u0 = 0,
-                         .v0 = 0,
-                         .u1 = 1,
-                         .v1 = 1,
-                         .color = clear_color};
-    cc_platform_draw_quad(platform, &background);
+    /* Preserve the requested clear RGBA inside the content viewport. Blending
+     * a translucent background over the opaque bars would change both RGB and A. */
+    CcMaterialQuad background = {0};
+    background.has_blend_mode = true;
+    background.registers[1][0] = clear_color.r;
+    background.registers[1][1] = clear_color.g;
+    background.registers[1][2] = clear_color.b;
+    background.registers[1][3] = clear_color.a;
+    for (unsigned index = 0; index < CC_QUAD_CORNERS; ++index) {
+        background.vertices[index].x = index & 1 ? CC_FRAME_WIDTH : 0;
+        background.vertices[index].y = index & 2 ? CC_FRAME_HEIGHT : 0;
+        background.vertices[index].color = (CcColor){1, 1, 1, 1};
+    }
+    cc_platform_draw_material_quad(platform, &background);
 }
 
 void cc_platform_set_clip(CcPlatform *platform, const CcClipRect *rect) {

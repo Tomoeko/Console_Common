@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -171,7 +172,10 @@ CcCaptureQueue *cc_capture_queue_open_with_audio(const char *path, unsigned widt
     return queue;
 
 release_failed:
-    cc_capture_writer_close(queue->writer);
+    if (queue->writer) {
+        cc_capture_writer_close(queue->writer);
+        remove(path); /* No recording owner was created for this exclusive file. */
+    }
     release_queue(queue);
     return NULL;
 }

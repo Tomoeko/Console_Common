@@ -291,6 +291,17 @@ static void test_open_failures(const char *directory) {
     fail_thread = true;
     assert(!cc_capture_queue_open(path, 1, 1, 60, 48000));
     fail_thread = false;
+    errno = 0;
+    FILE *file = fopen(path, "rb");
+    assert(!file && errno == ENOENT);
+
+    file = fopen(path, "wb");
+    assert(file && fputs("Existing recording", file) >= 0 && fclose(file) == 0);
+    assert(!cc_capture_queue_open(path, 1, 1, 60, 48000));
+    char contents[32] = {0};
+    file = fopen(path, "rb");
+    assert(file && fread(contents, 1, sizeof(contents), file) == 18);
+    assert(!strcmp(contents, "Existing recording") && fclose(file) == 0);
     remove(path);
 }
 
