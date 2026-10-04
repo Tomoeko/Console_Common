@@ -52,10 +52,16 @@ static TOKEN_USER *current_user(void) {
 }
 
 bool cc_tool_private_security(SECURITY_ATTRIBUTES *attributes,
-                              SECURITY_DESCRIPTOR *descriptor, PACL *acl) {
+                              PSECURITY_DESCRIPTOR *descriptor) {
+    *descriptor = NULL;
     TOKEN_USER *user = current_user();
     if (!user)
         return false;
+    PACL acl = NULL;
+    SECURITY_DESCRIPTOR absolute;
+    bool okay = false;
+    DWORD size = 0;
+    DWORD failure = ERROR_SUCCESS;
     EXPLICIT_ACCESSW access = {0};
     access.grfAccessPermissions = GENERIC_ALL;
     access.grfAccessMode = SET_ACCESS;
@@ -63,16 +69,42 @@ bool cc_tool_private_security(SECURITY_ATTRIBUTES *attributes,
     access.Trustee.TrusteeForm = TRUSTEE_IS_SID;
     access.Trustee.TrusteeType = TRUSTEE_IS_USER;
     access.Trustee.ptstrName = user->User.Sid;
-    bool okay =
-        SetEntriesInAclW(1, &access, NULL, acl) == ERROR_SUCCESS &&
-        InitializeSecurityDescriptor(descriptor, SECURITY_DESCRIPTOR_REVISION) &&
-        SetSecurityDescriptorDacl(descriptor, TRUE, *acl, FALSE);
+    DWORD status = SetEntriesInAclW(1, &access, NULL, &acl);
+    if (status != ERROR_SUCCESS) {
+        SetLastError(status);
+        goto release_security;
+    }
+    if (!InitializeSecurityDescriptor(&absolute, SECURITY_DESCRIPTOR_REVISION) ||
+        !SetSecurityDescriptorDacl(&absolute, TRUE, acl, FALSE) ||
+        !SetSecurityDescriptorOwner(&absolute, user->User.Sid, FALSE) ||
+        !SetSecurityDescriptorControl(&absolute, SE_DACL_PROTECTED, SE_DACL_PROTECTED))
+        goto release_security;
+    if (MakeSelfRelativeSD(&absolute, NULL, &size) ||
+        GetLastError() != ERROR_INSUFFICIENT_BUFFER)
+        goto release_security;
+    *descriptor = LocalAlloc(LMEM_FIXED, size);
+    if (!*descriptor) {
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        goto release_security;
+    }
+    okay = MakeSelfRelativeSD(&absolute, *descriptor, &size) != FALSE;
+
+release_security:
+    failure = okay ? ERROR_SUCCESS : GetLastError();
+    LocalFree(acl);
     free(user);
     if (okay) {
         attributes->nLength = sizeof(*attributes);
-        attributes->lpSecurityDescriptor = descriptor;
+        attributes->lpSecurityDescriptor = *descriptor;
         attributes->bInheritHandle = FALSE;
+    } else {
+        LocalFree(*descriptor);
+        *descriptor = NULL;
     }
+    /* The owned relative descriptor retains its SID and ACL through creation.
+     * Explicit ownership also covers elevated tokens whose default owner is
+     * the administrators group. Parent ACLs must not broaden private staging. */
+    SetLastError(failure);
     return okay;
 }
 

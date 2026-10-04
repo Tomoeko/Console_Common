@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <aclapi.h>
 
 #include "console_common/support/tool_io.h"
 #include "console_common/support/host.h"
@@ -7,12 +8,60 @@
 #include <errno.h>
 #include <string.h>
 #include "junction.h"
+#include "platform/windows/tool_io_internal.h"
 
 static void expect_file(const char *path, const char *text) {
     FILE *stream = cc_host_fopen(path, "rb");
     char bytes[16] = {0};
     assert(stream && fread(bytes, 1, sizeof(bytes) - 1, stream) == strlen(text));
     assert(fclose(stream) == 0 && !strcmp(bytes, text));
+}
+
+static void test_private_children(int root) {
+    assert(mkdirat(root, "shared-parent", 0700) == 0);
+    int parent = openat(root, "shared-parent", O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+    assert(parent >= 0);
+    char *path = cc_tool_handle_path((HANDLE)_get_osfhandle(parent));
+    WCHAR *wide = path ? cc_windows_path(path) : NULL;
+    assert(wide);
+    HANDLE handle =
+        CreateFileW(wide, READ_CONTROL | WRITE_DAC, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    assert(handle != INVALID_HANDLE_VALUE);
+    BYTE everyone[SECURITY_MAX_SID_SIZE];
+    DWORD sid_size = sizeof(everyone);
+    assert(CreateWellKnownSid(WinWorldSid, NULL, everyone, &sid_size));
+    EXPLICIT_ACCESSW access = {0};
+    access.grfAccessPermissions = GENERIC_ALL;
+    access.grfAccessMode = SET_ACCESS;
+    access.grfInheritance = SUB_CONTAINERS_AND_OBJECTS_INHERIT;
+    access.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+    access.Trustee.ptstrName = (LPWSTR)everyone;
+    PACL acl = NULL;
+    assert(SetEntriesInAclW(1, &access, NULL, &acl) == ERROR_SUCCESS);
+    assert(
+        SetSecurityInfo(handle, SE_FILE_OBJECT,
+                        DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                        NULL, NULL, acl, NULL) == ERROR_SUCCESS);
+    LocalFree(acl);
+    assert(CloseHandle(handle));
+    free(wide);
+    free(path);
+    struct stat metadata;
+    assert(fstat(parent, &metadata) == 0 && (metadata.st_mode & 0777) == 0777);
+    assert(mkdirat(parent, "private-child", 0700) == 0);
+    assert(fstatat(parent, "private-child", &metadata, AT_SYMLINK_NOFOLLOW) == 0);
+    assert(metadata.st_uid == getuid() && (metadata.st_mode & 0777) == 0700);
+    int file = openat(parent, "private.bin", O_WRONLY | O_CREAT | O_EXCL, 0600);
+    assert(file >= 0 && fstat(file, &metadata) == 0);
+    assert(metadata.st_uid == getuid() && !(metadata.st_mode & 0022));
+    assert(close(file) == 0 && unlinkat(parent, "private.bin", 0) == 0);
+    char *child_path = cc_tool_child_path(parent, "private-child");
+    assert(child_path && rmdir(child_path) == 0);
+    free(child_path);
+    path = cc_tool_child_path(root, "shared-parent");
+    assert(path && close(parent) == 0 && rmdir(path) == 0);
+    free(path);
 }
 
 int main(void) {
@@ -23,6 +72,7 @@ int main(void) {
     assert(metadata.st_uid == getuid() && (metadata.st_mode & 0777) == 0700);
     int directory = open(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
     assert(directory >= 0 && fsync(directory) == 0);
+    test_private_children(directory);
     assert(mkdirat(directory, "child", 0700) == 0);
     int child = openat(directory, "child", O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
     assert(child >= 0);

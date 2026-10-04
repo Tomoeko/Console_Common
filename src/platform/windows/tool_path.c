@@ -138,15 +138,13 @@ int cc_tool_unlinkat(int root, const char *name, int flags) {
 int cc_tool_mkdir(const char *path, cc_tool_mode mode) {
     WCHAR *wide = cc_windows_path(path);
     SECURITY_ATTRIBUTES attributes = {0};
-    SECURITY_DESCRIPTOR descriptor;
-    PACL acl = NULL;
+    PSECURITY_DESCRIPTOR descriptor = NULL;
     bool private = (mode & 0777) == 0700;
-    bool okay =
-        wide &&
-        (!private || cc_tool_private_security(&attributes, &descriptor, &acl)) &&
-        CreateDirectoryW(wide, private ? &attributes : NULL);
+    bool okay = wide &&
+                (!private || cc_tool_private_security(&attributes, &descriptor)) &&
+                CreateDirectoryW(wide, private ? &attributes : NULL);
     DWORD error = GetLastError();
-    LocalFree(acl);
+    LocalFree(descriptor);
     free(wide);
     return okay ? 0 : cc_tool_error(error);
 }

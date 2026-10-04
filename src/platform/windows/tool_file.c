@@ -40,10 +40,9 @@ int cc_tool_open(const char *path, int flags, ...) {
     DWORD creation = (flags & O_CREAT) ? ((flags & O_EXCL) ? CREATE_NEW : OPEN_ALWAYS)
                                        : OPEN_EXISTING;
     SECURITY_ATTRIBUTES attributes = {0};
-    SECURITY_DESCRIPTOR security;
-    PACL acl = NULL;
+    PSECURITY_DESCRIPTOR security = NULL;
     bool private = (flags & O_CREAT) && (mode & 0077) == 0;
-    if (private && !cc_tool_private_security(&attributes, &security, &acl)) {
+    if (private && !cc_tool_private_security(&attributes, &security)) {
         free(wide);
         return cc_tool_error(GetLastError());
     }
@@ -54,7 +53,7 @@ int cc_tool_open(const char *path, int flags, ...) {
                         ((flags & O_NOFOLLOW) ? FILE_FLAG_OPEN_REPARSE_POINT : 0),
                     NULL);
     DWORD error = GetLastError();
-    LocalFree(acl);
+    LocalFree(security);
     free(wide);
     if (handle == INVALID_HANDLE_VALUE)
         return cc_tool_error(error);
