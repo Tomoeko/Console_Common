@@ -250,9 +250,11 @@ int main(void) {
         REQUIRE(!cc_indexed_program_release(renderer, &program, NULL, 0));
         REQUIRE(!cc_indexed_mesh_release(renderer, &mesh, NULL, 0));
         REQUIRE(!cc_indexed_texture_release(renderer, &texture, NULL, 0));
+        REQUIRE(cc_indexed_mesh_update(renderer, mesh, replacement, sizeof(replacement),
+                                       NULL, 0));
+        REQUIRE(cc_indexed_draw(renderer, &draw, error, sizeof(error)));
         REQUIRE(!cc_indexed_mesh_update(renderer, mesh, replacement,
                                         sizeof(replacement), NULL, 0));
-        REQUIRE(cc_indexed_draw(renderer, &draw, error, sizeof(error)));
         draw.first_index = 1;
         REQUIRE(!cc_indexed_draw(renderer, &draw, NULL, 0));
         draw.first_index = 0;

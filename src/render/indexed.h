@@ -28,6 +28,9 @@ bool cc_indexed_program_validate(const CcIndexedProgramDescription *description,
                                  char *error, size_t error_capacity);
 bool cc_indexed_mesh_validate(const CcIndexedMeshDescription *description, char *error,
                               size_t error_capacity);
+bool cc_indexed_mesh_update_validate(size_t expected, const void *vertices,
+                                     size_t vertex_bytes, char *error,
+                                     size_t error_capacity);
 bool cc_indexed_texture_validate(const CcIndexedTextureDescription *description,
                                  char *error, size_t error_capacity);
 bool cc_indexed_frame_validate(const CcIndexedFrame *frame, char *error,

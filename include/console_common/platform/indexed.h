@@ -267,12 +267,18 @@ CcIndexedMesh *cc_indexed_mesh_create(CcIndexedRenderer *renderer,
                                       const CcIndexedMeshDescription *description,
                                       char *error, size_t error_capacity);
 /* Fixed-capacity dynamic meshes preserve the immutable index list and vertex
- * layout. Update replaces exactly the original vertex byte span, copying the
- * caller's data outside an active frame without application heap allocation.
- * Metal keeps an initial buffer per in-flight frame and updates a slot only
- * after its previous command completes. GLES2 uses core BufferSubData; driver
- * synchronization may block. No update changes a frame already submitted.
- * Ordinary immutable meshes reject updates. */
+ * layout. Update replaces exactly the original vertex byte span without
+ * application heap allocation or GPU buffer recreation. Call on the owning
+ * render thread outside a frame, or before the first accepted draw using that
+ * mesh in an active frame. Accepted deferred Metal draws also mark use; later
+ * updates reject before mutation, including after an accepted empty draw.
+ * Metal changes only a retired in-flight slot and stages other slots. GLES2
+ * uses core BufferSubData and driver synchronization may block. An entered
+ * GLES2 update failure latches an active frame failure and invalidates vertices
+ * until a successful complete update repairs them. Cold validation failures
+ * preserve storage and allow retry. Ordinary immutable meshes reject updates.
+ * Source data is borrowed only for the call and must be bounded and disjoint
+ * from renderer-owned controls/storage and the writable diagnostic view. */
 CcIndexedMesh *
 cc_indexed_mesh_create_dynamic(CcIndexedRenderer *renderer,
                                const CcIndexedMeshDescription *description, char *error,

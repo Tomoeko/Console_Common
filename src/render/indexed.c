@@ -87,8 +87,11 @@ bool cc_indexed_program_validate(const CcIndexedProgramDescription *description,
 
 bool cc_indexed_mesh_validate(const CcIndexedMeshDescription *description, char *error,
                               size_t error_capacity) {
-    if (!description || !description->vertices || !description->indices ||
-        !description->vertex_count || description->vertex_count > UINT16_MAX + 1u ||
+    if (!description || (uintptr_t)description % _Alignof(CcIndexedMeshDescription) ||
+        sizeof(*description) > UINTPTR_MAX - (uintptr_t)description)
+        return fail(error, error_capacity, "invalid indexed mesh description");
+    if (!description->vertices || !description->indices || !description->vertex_count ||
+        description->vertex_count > UINT16_MAX + 1u ||
         description->vertex_stride < sizeof(float) * 4 ||
         description->vertex_stride > INT_MAX ||
         description->vertex_stride % sizeof(float) ||
@@ -97,10 +100,25 @@ bool cc_indexed_mesh_validate(const CcIndexedMeshDescription *description, char 
         description->index_count % 3 ||
         description->index_count > PTRDIFF_MAX / sizeof(uint16_t))
         return fail(error, error_capacity, "invalid indexed mesh storage");
+    size_t vertex_bytes = description->vertex_count * description->vertex_stride;
+    size_t index_bytes = description->index_count * sizeof(uint16_t);
+    if (vertex_bytes > UINTPTR_MAX - (uintptr_t)description->vertices ||
+        (uintptr_t)description->indices % _Alignof(uint16_t) ||
+        index_bytes > UINTPTR_MAX - (uintptr_t)description->indices)
+        return fail(error, error_capacity, "invalid indexed mesh backing");
     for (size_t index = 0; index < description->index_count; ++index) {
         if (description->indices[index] >= description->vertex_count)
             return fail(error, error_capacity, "indexed mesh index out of range");
     }
+    return true;
+}
+
+bool cc_indexed_mesh_update_validate(size_t expected, const void *vertices,
+                                     size_t vertex_bytes, char *error,
+                                     size_t error_capacity) {
+    if (!vertices || !expected || vertex_bytes != expected ||
+        vertex_bytes > UINTPTR_MAX - (uintptr_t)vertices)
+        return fail(error, error_capacity, "invalid indexed mesh update span");
     return true;
 }
 

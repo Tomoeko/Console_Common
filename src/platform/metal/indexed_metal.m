@@ -78,6 +78,7 @@ struct CcIndexedMesh {
     size_t index_count;
     uint8_t *staging;
     bool dirty[CC_IN_FLIGHT_FRAMES];
+    bool used;
 };
 
 struct CcIndexedTexture {
@@ -683,6 +684,7 @@ static bool begin_frame(CcIndexedRenderer *renderer, const CcIndexedFrame *frame
     }
     frames->commands[slot] = nil;
     for (CcIndexedMesh *mesh = renderer->meshes; mesh; mesh = mesh->next) {
+        mesh->used = false;
         if (mesh->dirty[slot]) {
             CcIndexedMetalMesh *objects = (__bridge CcIndexedMetalMesh *)mesh->objects;
             memcpy(objects->frameVertices[slot].contents, mesh->staging,
@@ -778,6 +780,7 @@ bool cc_indexed_draw(CcIndexedRenderer *renderer, const CcIndexedDraw *draw,
     if (draw->fragment_uniform_count)
         memcpy(uniforms + offset + CC_INDEXED_UNIFORM_BYTES, draw->fragment_uniforms,
                draw->fragment_uniform_count * sizeof(float) * 4);
+    draw->mesh->used = true;
     for (size_t unit = 0; unit < draw->texture_count; ++unit)
         draw->textures[unit]->used = true;
     ++renderer->draw_count;
@@ -993,17 +996,28 @@ bool cc_indexed_mesh_update(CcIndexedRenderer *renderer, CcIndexedMesh *mesh,
                             const void *vertices, size_t vertex_bytes, char *error,
                             size_t error_capacity) {
     @autoreleasepool {
-        if (!prepare_resources(renderer, error, error_capacity))
-            return false;
+        CcMetalState *native = native_state(renderer);
+        if (!renderer || !native || !native->device)
+            return fail(error, error_capacity, "indexed mesh context unavailable");
         CcIndexedMesh *member = renderer->meshes;
         while (member && member != mesh)
             member = member->next;
-        if (!member || !member->staging || !vertices ||
-            vertex_bytes != member->vertex_bytes)
-            return fail(error, error_capacity, "invalid indexed mesh update");
+        if (!member || !member->staging || (renderer->active && member->used))
+            return fail(error, error_capacity, "indexed mesh cannot be updated");
+        if (!cc_indexed_mesh_update_validate(member->vertex_bytes, vertices,
+                                             vertex_bytes, error, error_capacity))
+            return false;
         memcpy(member->staging, vertices, vertex_bytes);
         for (size_t index = 0; index < CC_IN_FLIGHT_FRAMES; ++index)
             member->dirty[index] = true;
+        if (renderer->active) {
+            size_t slot = renderer->frame_number % CC_IN_FLIGHT_FRAMES;
+            CcIndexedMetalMesh *objects =
+                (__bridge CcIndexedMetalMesh *)member->objects;
+            memcpy(objects->frameVertices[slot].contents, member->staging,
+                   vertex_bytes);
+            member->dirty[slot] = false;
+        }
         return true;
     }
 }

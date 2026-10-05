@@ -39,6 +39,8 @@ struct CcIndexedMesh {
     size_t vertex_bytes;
     size_t index_count;
     bool dynamic_vertices;
+    bool vertices_valid;
+    bool used;
 };
 
 struct CcIndexedTexture {
@@ -322,6 +324,7 @@ static CcIndexedMesh *create_mesh(CcIndexedRenderer *renderer,
     mesh->vertex_bytes = description->vertex_count * description->vertex_stride;
     mesh->index_count = description->index_count;
     mesh->dynamic_vertices = dynamic_vertices;
+    mesh->vertices_valid = true;
     mesh->next = renderer->meshes;
     renderer->meshes = mesh;
     return mesh;
@@ -343,18 +346,26 @@ cc_indexed_mesh_create_dynamic(CcIndexedRenderer *renderer,
 bool cc_indexed_mesh_update(CcIndexedRenderer *renderer, CcIndexedMesh *mesh,
                             const void *vertices, size_t vertex_bytes, char *error,
                             size_t error_capacity) {
-    if (!prepare_resources(renderer, error, error_capacity))
-        return false;
+    if (!renderer || (renderer->active && renderer->failed) ||
+        !cc_gles2_host_make_current(renderer->host))
+        return fail(error, error_capacity, "indexed mesh context unavailable");
     CcIndexedMesh *member = renderer->meshes;
     while (member && member != mesh)
         member = member->next;
-    if (!member || !member->dynamic_vertices || !vertices ||
-        vertex_bytes != member->vertex_bytes)
-        return fail(error, error_capacity, "invalid indexed mesh update");
+    if (!member || !member->dynamic_vertices || (renderer->active && member->used))
+        return fail(error, error_capacity, "indexed mesh cannot be updated");
+    if (!cc_indexed_mesh_update_validate(member->vertex_bytes, vertices, vertex_bytes,
+                                         error, error_capacity))
+        return false;
     glBindBuffer(GL_ARRAY_BUFFER, member->vertices);
     glBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizeiptr)vertex_bytes, vertices);
-    return glGetError() == GL_NO_ERROR ||
-           fail(error, error_capacity, "cannot update indexed GLES2 vertices");
+    if (glGetError() != GL_NO_ERROR) {
+        member->vertices_valid = false;
+        renderer->failed = renderer->active;
+        return fail(error, error_capacity, "cannot update indexed GLES2 vertices");
+    }
+    member->vertices_valid = true;
+    return true;
 }
 
 bool cc_indexed_program_release(CcIndexedRenderer *renderer, CcIndexedProgram **program,
@@ -557,6 +568,8 @@ bool cc_indexed_begin_passes(CcIndexedRenderer *renderer, const CcIndexedFrame *
     cc_gles2_host_surface_size(renderer->host, &renderer->width, &renderer->height);
     if (renderer->width <= 0 || renderer->height <= 0)
         return fail(error, error_capacity, "indexed drawable has no area");
+    for (CcIndexedMesh *mesh = renderer->meshes; mesh; mesh = mesh->next)
+        mesh->used = false;
     for (CcIndexedTexture *texture = renderer->textures; texture;
          texture = texture->next)
         texture->used = false;
@@ -640,6 +653,8 @@ static bool draw_validate(CcIndexedRenderer *renderer, const CcIndexedDraw *draw
         draw->first_index % 3 || draw->index_count % 3 ||
         draw->texture_count != draw->program->texture_count)
         return fail(error, error_capacity, "invalid indexed draw ownership or range");
+    if (!draw->mesh->vertices_valid)
+        return fail(error, error_capacity, "indexed mesh needs a full repair");
     if (!cc_indexed_uniforms_validate(draw->vertex_uniforms, draw->vertex_uniform_count,
                                       draw->program->vertex_uniform_count, error,
                                       error_capacity) ||
@@ -708,6 +723,7 @@ bool cc_indexed_draw(CcIndexedRenderer *renderer, const CcIndexedDraw *draw,
     }
     glDrawElements(GL_TRIANGLES, (GLsizei)draw->index_count, GL_UNSIGNED_SHORT,
                    (const void *)(draw->first_index * sizeof(uint16_t)));
+    draw->mesh->used = true;
     for (size_t unit = 0; unit < draw->texture_count; ++unit)
         draw->textures[unit]->used = true;
     ++renderer->draw_count;

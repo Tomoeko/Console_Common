@@ -241,6 +241,30 @@ if(APPLE)
     add_test(NAME cc-indexed-texture-gles2-apple
         COMMAND cc-indexed-texture-gles2-apple-test)
     set_tests_properties(cc-indexed-texture-gles2-apple PROPERTIES SKIP_RETURN_CODE 77)
+
+    add_executable(cc-indexed-mesh-metal-test platform/indexed_mesh_metal_test.m)
+    cc_add_platform(cc-indexed-mesh-metal-test metal)
+    set_source_files_properties(platform/indexed_mesh_metal_test.m
+        PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+    target_compile_options(cc-indexed-mesh-metal-test PRIVATE
+        -Wall -Wextra -Werror -Wpedantic -Wconversion)
+    add_test(NAME cc-indexed-mesh-metal COMMAND cc-indexed-mesh-metal-test)
+    set_tests_properties(cc-indexed-mesh-metal PROPERTIES SKIP_RETURN_CODE 77)
+
+    add_executable(cc-indexed-mesh-gles2-apple-test
+        platform/indexed_mesh_gles2_apple_test.c
+        "${common_root}/src/platform/gles2/indexed_gles2.c")
+    target_include_directories(cc-indexed-mesh-gles2-apple-test PRIVATE
+        "${common_root}/tests/platform/apple_gl_compat"
+        "${common_root}/src/platform/gles2"
+        "${common_root}/src/render")
+    target_compile_options(cc-indexed-mesh-gles2-apple-test PRIVATE
+        -Wall -Wextra -Werror -Wpedantic -Wconversion -Wno-deprecated-declarations
+        -include "${common_root}/tests/platform/apple_gl_compat/indexed_host.h")
+    target_link_libraries(cc-indexed-mesh-gles2-apple-test PRIVATE
+        console_common "-framework OpenGL")
+    add_test(NAME cc-indexed-mesh-gles2-apple COMMAND cc-indexed-mesh-gles2-apple-test)
+    set_tests_properties(cc-indexed-mesh-gles2-apple PROPERTIES SKIP_RETURN_CODE 77)
 endif()
 
 # Texture metadata is independent of a graphics context and is tested on every host.
