@@ -33,7 +33,10 @@ enum { CC_INDEXED_UNIFORM_BYTES = CC_INDEXED_UNIFORMS * 4 * sizeof(float) };
 @implementation CcIndexedMetalMesh
 @end
 
-@interface CcIndexedMetalTexture : NSObject
+@interface CcIndexedMetalTexture : NSObject {
+  @public
+    id<MTLTexture> frameTextures[CC_IN_FLIGHT_FRAMES];
+}
 @property(nonatomic, strong) id<MTLTexture> texture;
 @property(nonatomic, strong) id<MTLTexture> depth;
 @property(nonatomic, strong) id<MTLSamplerState> sampler;
@@ -82,6 +85,10 @@ struct CcIndexedTexture {
     CcIndexedRenderer *owner;
     CcIndexedTexture *next;
     void *objects;
+    CcIndexedTextureLayout layout;
+    uint8_t *staging;
+    bool dirty[CC_IN_FLIGHT_FRAMES];
+    bool used;
 };
 
 struct CcIndexedTarget {
@@ -207,6 +214,7 @@ void cc_indexed_destroy(CcIndexedRenderer *renderer) {
         CcIndexedTexture *texture = renderer->textures;
         renderer->textures = texture->next;
         (void)CFBridgingRelease(texture->objects);
+        free(texture->staging);
         free(texture);
     }
     while (renderer->targets) {
@@ -504,11 +512,28 @@ static CcIndexedMesh *create_mesh(CcIndexedRenderer *renderer,
     return mesh;
 }
 
+static void upload_texture_slot(CcIndexedTexture *texture, size_t slot) {
+    CcIndexedMetalTexture *objects = (__bridge CcIndexedMetalTexture *)texture->objects;
+    for (size_t index = 0; index < texture->layout.level_count; ++index) {
+        const CcIndexedTextureLevel *level = &texture->layout.levels[index];
+        MTLRegion region = MTLRegionMake2D(0, 0, level->width, level->height);
+        [objects->frameTextures[slot] replaceRegion:region
+                                        mipmapLevel:index
+                                          withBytes:texture->staging + level->offset
+                                        bytesPerRow:(size_t)level->width * 4];
+    }
+    texture->dirty[slot] = false;
+}
+
 static CcIndexedTexture *create_texture(CcIndexedRenderer *renderer,
                                         const CcIndexedTextureDescription *description,
-                                        char *error, size_t error_capacity) {
+                                        bool dynamic, char *error,
+                                        size_t error_capacity) {
+    CcIndexedTextureLayout storage = {0};
     if (!prepare_resources(renderer, error, error_capacity) ||
-        !cc_indexed_texture_validate(description, error, error_capacity))
+        (dynamic
+             ? !cc_indexed_texture_layout(description, &storage, error, error_capacity)
+             : !cc_indexed_texture_validate(description, error, error_capacity)))
         return NULL;
     if (description->levels[0].width > 16384 || description->levels[0].height > 16384) {
         fail(error, error_capacity, "indexed texture exceeds Metal 2D limit");
@@ -524,18 +549,25 @@ static CcIndexedTexture *create_texture(CcIndexedRenderer *renderer,
     layout.storageMode = MTLStorageModeShared;
     layout.usage = MTLTextureUsageShaderRead;
     CcIndexedMetalTexture *objects = [CcIndexedMetalTexture new];
-    objects.texture = [native->device newTextureWithDescriptor:layout];
-    if (!objects.texture) {
-        fail(error, error_capacity, "cannot allocate indexed Metal texture");
-        return NULL;
-    }
-    for (size_t index = 0; index < description->level_count; ++index) {
-        const CcIndexedMip *level = &description->levels[index];
-        MTLRegion region = MTLRegionMake2D(0, 0, level->width, level->height);
-        [objects.texture replaceRegion:region
-                           mipmapLevel:index
-                             withBytes:level->rgba
-                           bytesPerRow:(size_t)level->width * 4];
+    size_t texture_count = dynamic ? CC_IN_FLIGHT_FRAMES : 1;
+    for (size_t slot = 0; slot < texture_count; ++slot) {
+        id<MTLTexture> texture = [native->device newTextureWithDescriptor:layout];
+        if (!texture) {
+            fail(error, error_capacity, "cannot allocate indexed Metal texture");
+            return NULL;
+        }
+        if (dynamic)
+            objects->frameTextures[slot] = texture;
+        else
+            objects.texture = texture;
+        for (size_t index = 0; index < description->level_count; ++index) {
+            const CcIndexedMip *level = &description->levels[index];
+            MTLRegion region = MTLRegionMake2D(0, 0, level->width, level->height);
+            [texture replaceRegion:region
+                       mipmapLevel:index
+                         withBytes:level->rgba
+                       bytesPerRow:(size_t)level->width * 4];
+        }
     }
     MTLSamplerDescriptor *sampler = [MTLSamplerDescriptor new];
     sampler.minFilter = description->min_filter == CC_INDEXED_LINEAR
@@ -565,6 +597,18 @@ static CcIndexedTexture *create_texture(CcIndexedRenderer *renderer,
     if (!texture) {
         fail(error, error_capacity, "cannot allocate indexed texture");
         return NULL;
+    }
+    if (dynamic) {
+        texture->staging = malloc(storage.byte_count);
+        if (!texture->staging) {
+            free(texture);
+            fail(error, error_capacity, "cannot allocate dynamic texture staging");
+            return NULL;
+        }
+        texture->layout = storage;
+        for (size_t index = 0; index < storage.level_count; ++index)
+            memcpy(texture->staging + storage.levels[index].offset,
+                   description->levels[index].rgba, storage.levels[index].byte_count);
     }
     texture->owner = renderer;
     texture->objects = (__bridge_retained void *)objects;
@@ -645,6 +689,12 @@ static bool begin_frame(CcIndexedRenderer *renderer, const CcIndexedFrame *frame
                    mesh->vertex_bytes);
             mesh->dirty[slot] = false;
         }
+    }
+    for (CcIndexedTexture *texture = renderer->textures; texture;
+         texture = texture->next) {
+        texture->used = false;
+        if (texture->dirty[slot])
+            upload_texture_slot(texture, slot);
     }
     renderer->frame = *frame;
     if (!prepare_drawable(renderer, error, error_capacity) ||
@@ -728,6 +778,8 @@ bool cc_indexed_draw(CcIndexedRenderer *renderer, const CcIndexedDraw *draw,
     if (draw->fragment_uniform_count)
         memcpy(uniforms + offset + CC_INDEXED_UNIFORM_BYTES, draw->fragment_uniforms,
                draw->fragment_uniform_count * sizeof(float) * 4);
+    for (size_t unit = 0; unit < draw->texture_count; ++unit)
+        draw->textures[unit]->used = true;
     ++renderer->draw_count;
     ++renderer->passes[renderer->pass_count - 1].draw_count;
     return true;
@@ -769,7 +821,10 @@ static void encode_draw(CcIndexedRenderer *renderer,
     for (size_t unit = 0; unit < draw->texture_count; ++unit) {
         CcIndexedMetalTexture *texture =
             (__bridge CcIndexedMetalTexture *)draw->textures[unit]->objects;
-        [encoder setFragmentTexture:texture.texture atIndex:unit];
+        id<MTLTexture> sampled = draw->textures[unit]->staging
+                                     ? texture->frameTextures[slot]
+                                     : texture.texture;
+        [encoder setFragmentTexture:sampled atIndex:unit];
         [encoder setFragmentSamplerState:texture.sampler atIndex:unit];
     }
     [encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
@@ -1020,6 +1075,7 @@ bool cc_indexed_texture_release(CcIndexedRenderer *renderer, CcIndexedTexture **
         CcIndexedTexture *released = *slot;
         *slot = released->next;
         (void)CFBridgingRelease(released->objects);
+        free(released->staging);
         free(released);
         *texture = NULL;
         return true;
@@ -1031,7 +1087,40 @@ cc_indexed_texture_create(CcIndexedRenderer *renderer,
                           const CcIndexedTextureDescription *description, char *error,
                           size_t error_capacity) {
     @autoreleasepool {
-        return create_texture(renderer, description, error, error_capacity);
+        return create_texture(renderer, description, false, error, error_capacity);
+    }
+}
+
+CcIndexedTexture *
+cc_indexed_texture_create_dynamic(CcIndexedRenderer *renderer,
+                                  const CcIndexedTextureDescription *description,
+                                  char *error, size_t error_capacity) {
+    @autoreleasepool {
+        return create_texture(renderer, description, true, error, error_capacity);
+    }
+}
+
+bool cc_indexed_texture_update(CcIndexedRenderer *renderer, CcIndexedTexture *texture,
+                               size_t level, const uint8_t *rgba, size_t byte_count,
+                               char *error, size_t error_capacity) {
+    @autoreleasepool {
+        CcMetalState *native = native_state(renderer);
+        if (!renderer || !native || !native->device)
+            return fail(error, error_capacity, "indexed texture context unavailable");
+        CcIndexedTexture *member = renderer->textures;
+        while (member && member != texture)
+            member = member->next;
+        if (!member || !member->staging || (renderer->active && member->used))
+            return fail(error, error_capacity, "indexed texture cannot be updated");
+        if (!cc_indexed_texture_update_validate(&member->layout, level, rgba,
+                                                byte_count, error, error_capacity))
+            return false;
+        memcpy(member->staging + member->layout.levels[level].offset, rgba, byte_count);
+        for (size_t slot = 0; slot < CC_IN_FLIGHT_FRAMES; ++slot)
+            member->dirty[slot] = true;
+        if (renderer->active)
+            upload_texture_slot(member, renderer->frame_number % CC_IN_FLIGHT_FRAMES);
+        return true;
     }
 }
 

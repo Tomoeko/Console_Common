@@ -46,6 +46,10 @@ struct CcIndexedTexture {
     CcIndexedRenderer *owner;
     CcIndexedTexture *next;
     GLuint texture;
+    CcIndexedTextureLayout layout;
+    uint32_t valid_levels;
+    bool dynamic;
+    bool used;
 };
 
 struct CcIndexedTarget {
@@ -434,12 +438,15 @@ static bool power_of_two(unsigned value) {
     return value && !(value & (value - 1));
 }
 
-CcIndexedTexture *
-cc_indexed_texture_create(CcIndexedRenderer *renderer,
-                          const CcIndexedTextureDescription *description, char *error,
-                          size_t error_capacity) {
+static CcIndexedTexture *create_texture(CcIndexedRenderer *renderer,
+                                        const CcIndexedTextureDescription *description,
+                                        bool dynamic, char *error,
+                                        size_t error_capacity) {
+    CcIndexedTextureLayout layout = {0};
     if (!prepare_resources(renderer, error, error_capacity) ||
-        !cc_indexed_texture_validate(description, error, error_capacity))
+        (dynamic
+             ? !cc_indexed_texture_layout(description, &layout, error, error_capacity)
+             : !cc_indexed_texture_validate(description, error, error_capacity)))
         return NULL;
     float last_level = description->mip_filter == CC_INDEXED_MIP_NONE
                            ? 0.0f
@@ -492,9 +499,54 @@ cc_indexed_texture_create(CcIndexedRenderer *renderer,
         return NULL;
     }
     texture->owner = renderer;
+    texture->dynamic = dynamic;
+    texture->layout = layout;
+    texture->valid_levels = dynamic ? (UINT32_C(1) << layout.level_count) - 1 : 0;
     texture->next = renderer->textures;
     renderer->textures = texture;
     return texture;
+}
+
+CcIndexedTexture *
+cc_indexed_texture_create(CcIndexedRenderer *renderer,
+                          const CcIndexedTextureDescription *description, char *error,
+                          size_t error_capacity) {
+    return create_texture(renderer, description, false, error, error_capacity);
+}
+
+CcIndexedTexture *
+cc_indexed_texture_create_dynamic(CcIndexedRenderer *renderer,
+                                  const CcIndexedTextureDescription *description,
+                                  char *error, size_t error_capacity) {
+    return create_texture(renderer, description, true, error, error_capacity);
+}
+
+bool cc_indexed_texture_update(CcIndexedRenderer *renderer, CcIndexedTexture *texture,
+                               size_t level, const uint8_t *rgba, size_t byte_count,
+                               char *error, size_t error_capacity) {
+    if (!renderer || (renderer->active && renderer->failed) ||
+        !cc_gles2_host_make_current(renderer->host))
+        return fail(error, error_capacity, "indexed texture context unavailable");
+    CcIndexedTexture *member = renderer->textures;
+    while (member && member != texture)
+        member = member->next;
+    if (!member || !member->dynamic || (renderer->active && member->used))
+        return fail(error, error_capacity, "indexed texture cannot be updated");
+    if (!cc_indexed_texture_update_validate(&member->layout, level, rgba, byte_count,
+                                            error, error_capacity))
+        return false;
+    const CcIndexedTextureLevel *mip = &member->layout.levels[level];
+    glBindTexture(GL_TEXTURE_2D, member->texture);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexSubImage2D(GL_TEXTURE_2D, (GLint)level, 0, 0, (GLsizei)mip->width,
+                    (GLsizei)mip->height, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    if (glGetError() != GL_NO_ERROR) {
+        member->valid_levels &= ~(UINT32_C(1) << level);
+        renderer->failed = renderer->active;
+        return fail(error, error_capacity, "indexed texture update failed");
+    }
+    member->valid_levels |= UINT32_C(1) << level;
+    return true;
 }
 
 bool cc_indexed_begin_passes(CcIndexedRenderer *renderer, const CcIndexedFrame *frame,
@@ -505,6 +557,9 @@ bool cc_indexed_begin_passes(CcIndexedRenderer *renderer, const CcIndexedFrame *
     cc_gles2_host_surface_size(renderer->host, &renderer->width, &renderer->height);
     if (renderer->width <= 0 || renderer->height <= 0)
         return fail(error, error_capacity, "indexed drawable has no area");
+    for (CcIndexedTexture *texture = renderer->textures; texture;
+         texture = texture->next)
+        texture->used = false;
     renderer->frame = *frame;
     renderer->draw_count = 0;
     renderer->pass_count = 0;
@@ -601,6 +656,9 @@ static bool draw_validate(CcIndexedRenderer *renderer, const CcIndexedDraw *draw
             member |= &target->texture == texture;
         if (!member)
             return fail(error, error_capacity, "invalid indexed texture ownership");
+        if (texture->dynamic &&
+            texture->valid_levels != (UINT32_C(1) << texture->layout.level_count) - 1)
+            return fail(error, error_capacity, "indexed texture needs a full repair");
         if (texture->target) {
             if (renderer->passes[renderer->pass_count - 1].description.target ==
                 texture->target)
@@ -650,6 +708,8 @@ bool cc_indexed_draw(CcIndexedRenderer *renderer, const CcIndexedDraw *draw,
     }
     glDrawElements(GL_TRIANGLES, (GLsizei)draw->index_count, GL_UNSIGNED_SHORT,
                    (const void *)(draw->first_index * sizeof(uint16_t)));
+    for (size_t unit = 0; unit < draw->texture_count; ++unit)
+        draw->textures[unit]->used = true;
     ++renderer->draw_count;
     ++renderer->passes[renderer->pass_count - 1].draw_count;
     return true;

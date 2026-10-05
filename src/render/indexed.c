@@ -139,6 +139,40 @@ bool cc_indexed_texture_validate(const CcIndexedTextureDescription *description,
     return true;
 }
 
+bool cc_indexed_texture_layout(const CcIndexedTextureDescription *description,
+                               CcIndexedTextureLayout *output, char *error,
+                               size_t error_capacity) {
+    if (!description ||
+        (uintptr_t)description % _Alignof(CcIndexedTextureDescription) ||
+        sizeof(*description) > UINTPTR_MAX - (uintptr_t)description || !output ||
+        !cc_indexed_texture_validate(description, error, error_capacity))
+        return fail(error, error_capacity, "invalid dynamic texture description");
+    CcIndexedTextureLayout layout = {0};
+    layout.level_count = description->level_count;
+    for (size_t index = 0; index < layout.level_count; ++index) {
+        const CcIndexedMip *level = &description->levels[index];
+        if (level->size > UINTPTR_MAX - (uintptr_t)level->rgba ||
+            level->size > SIZE_MAX - layout.byte_count)
+            return fail(error, error_capacity, "dynamic texture storage overflows");
+        layout.levels[index] = (CcIndexedTextureLevel){level->width, level->height,
+                                                       layout.byte_count, level->size};
+        layout.byte_count += level->size;
+    }
+    *output = layout;
+    return true;
+}
+
+bool cc_indexed_texture_update_validate(const CcIndexedTextureLayout *layout,
+                                        size_t level, const uint8_t *rgba,
+                                        size_t byte_count, char *error,
+                                        size_t error_capacity) {
+    if (!layout || level >= layout->level_count || !rgba ||
+        byte_count != layout->levels[level].byte_count ||
+        byte_count > UINTPTR_MAX - (uintptr_t)rgba)
+        return fail(error, error_capacity, "invalid dynamic texture update span");
+    return true;
+}
+
 bool cc_indexed_frame_validate(const CcIndexedFrame *frame, char *error,
                                size_t error_capacity) {
     if (!frame || !isfinite(frame->clear_color.r) || !isfinite(frame->clear_color.g) ||

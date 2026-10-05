@@ -284,6 +284,28 @@ CcIndexedTexture *
 cc_indexed_texture_create(CcIndexedRenderer *renderer,
                           const CcIndexedTextureDescription *description, char *error,
                           size_t error_capacity);
+/* Opt-in fixed-layout RGBA8 textures copy their initial mip data and sampler.
+ * Update replaces one complete original mip without allocating application
+ * storage or recreating GPU textures. Geometry, level count and sampler stay
+ * fixed; ordinary textures and render-target textures reject updates.
+ *
+ * Call on the owning render thread, either outside a frame or inside it before
+ * the first accepted draw using this texture. Acceptance marks use even when
+ * Metal defers encoding. Later updates in that frame reject before mutation.
+ * Metal owns one texture per in-flight slot and changes a slot only after its
+ * prior command retires; GLES2 uses core TexSubImage2D and may synchronize in
+ * the driver. An entered GLES2 update failure latches an active frame failure
+ * and invalidates that mip until a successful full update repairs it. Cold
+ * validation failures preserve the texture and allow retry.
+ * Source data is borrowed only for the call and must be bounded and disjoint
+ * from renderer-owned controls/storage and the writable diagnostic view. */
+CcIndexedTexture *
+cc_indexed_texture_create_dynamic(CcIndexedRenderer *renderer,
+                                  const CcIndexedTextureDescription *description,
+                                  char *error, size_t error_capacity);
+bool cc_indexed_texture_update(CcIndexedRenderer *renderer, CcIndexedTexture *texture,
+                               size_t level, const uint8_t *rgba, size_t byte_count,
+                               char *error, size_t error_capacity);
 /* Release on the owning render thread outside an active frame. Previously
  * submitted native commands retain their GPU resources until completion; no
  * explicit wait occurs here. Empty handles succeed. Wrong-owner/nonmember

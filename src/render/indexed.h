@@ -3,6 +3,27 @@
 
 #include "console_common/platform/indexed.h"
 
+typedef struct CcIndexedTextureLevel {
+    unsigned width;
+    unsigned height;
+    size_t offset;
+    size_t byte_count;
+} CcIndexedTextureLevel;
+
+typedef struct CcIndexedTextureLayout {
+    CcIndexedTextureLevel levels[CC_INDEXED_MIP_LEVELS];
+    size_t level_count;
+    size_t byte_count;
+} CcIndexedTextureLayout;
+
+bool cc_indexed_texture_layout(const CcIndexedTextureDescription *description,
+                               CcIndexedTextureLayout *output, char *error,
+                               size_t error_capacity);
+bool cc_indexed_texture_update_validate(const CcIndexedTextureLayout *layout,
+                                        size_t level, const uint8_t *rgba,
+                                        size_t byte_count, char *error,
+                                        size_t error_capacity);
+
 bool cc_indexed_program_validate(const CcIndexedProgramDescription *description,
                                  char *error, size_t error_capacity);
 bool cc_indexed_mesh_validate(const CcIndexedMeshDescription *description, char *error,
