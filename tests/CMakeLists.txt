@@ -139,6 +139,7 @@ foreach(test_name
     render/material_blend
     render/image_atomic
     render/indexed
+    render/indexed_strip
     render/texture_source
     resources/gx_texture
     support/endian

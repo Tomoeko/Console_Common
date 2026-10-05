@@ -26,6 +26,7 @@ add_library(console_common STATIC
     src/render/frame_damage.c
     src/render/image.c
     src/render/indexed.c
+    src/render/indexed_strip.c
     src/render/material.c
     src/render/material_blend.c
     src/render/texture_cache.c
