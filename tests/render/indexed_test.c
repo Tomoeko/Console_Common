@@ -163,11 +163,85 @@ static void frame_uniform_test(void) {
     REQUIRE(!cc_indexed_uniforms_validate(NULL, 1, 1, NULL, 0));
 }
 
+static void target_pass_test(void) {
+    CcIndexedTargetDescription target = {.width = 32,
+                                         .height = 16,
+                                         .color_format = CC_INDEXED_RGBA16_FLOAT,
+                                         .depth_attachment = true,
+                                         .min_filter = CC_INDEXED_LINEAR};
+    REQUIRE(cc_indexed_target_validate(&target, NULL, 0));
+    target.width = UINT_MAX;
+    REQUIRE(!cc_indexed_target_validate(&target, NULL, 0));
+    target.width = 32;
+    target.color_format = (CcIndexedColorFormat)-1;
+    REQUIRE(!cc_indexed_target_validate(&target, NULL, 0));
+    target.color_format = CC_INDEXED_RGBA8;
+    target.mag_filter = (CcIndexedFilter)2;
+    REQUIRE(!cc_indexed_target_validate(&target, NULL, 0));
+    CcIndexedPass pass = {.target = (CcIndexedTarget *)(uintptr_t)1,
+                          .viewport = {0, 0, 32, 16},
+                          .color_load = CC_INDEXED_LOAD,
+                          .depth_load = CC_INDEXED_DISCARD};
+    REQUIRE(!cc_indexed_pass_validate(&pass, 32, 16, false, false, false, NULL, 0));
+    pass.color_load = CC_INDEXED_DISCARD;
+    pass.color_full_write = true;
+    REQUIRE(cc_indexed_pass_validate(&pass, 32, 16, false, false, false, NULL, 0));
+    pass.viewport.x = INT_MAX;
+    REQUIRE(!cc_indexed_pass_validate(&pass, 32, 16, false, false, false, NULL, 0));
+    pass.viewport.x = -1;
+    REQUIRE(!cc_indexed_pass_validate(&pass, 32, 16, false, false, false, NULL, 0));
+    pass.viewport.x = 0;
+    pass.depth_load = CC_INDEXED_CLEAR;
+    REQUIRE(!cc_indexed_pass_validate(&pass, 32, 16, true, false, false, NULL, 0));
+    pass.depth_attachment = true;
+    REQUIRE(!cc_indexed_pass_validate(&pass, 32, 16, false, false, false, NULL, 0));
+    REQUIRE(cc_indexed_pass_validate(&pass, 32, 16, true, false, false, NULL, 0));
+    pass.depth_load = CC_INDEXED_LOAD;
+    REQUIRE(!cc_indexed_pass_validate(&pass, 32, 16, true, true, false, NULL, 0));
+    REQUIRE(cc_indexed_pass_validate(&pass, 32, 16, true, true, true, NULL, 0));
+    pass.color_load = (CcIndexedLoad)-1;
+    REQUIRE(!cc_indexed_pass_validate(&pass, 32, 16, true, true, true, NULL, 0));
+    REQUIRE(!cc_indexed_target_validate(NULL, NULL, 0));
+    REQUIRE(!cc_indexed_pass_validate(NULL, 32, 16, true, true, true, NULL, 0));
+}
+
+static void independent_rectangles_test(void) {
+    CcIndexedPass pass = {.viewport = {0, -720, 2560, 1440},
+                          .color_load = CC_INDEXED_CLEAR,
+                          .depth_load = CC_INDEXED_DISCARD,
+                          .scissor_enabled = true,
+                          .scissor = {0, 0, 2560, 720}};
+    REQUIRE(cc_indexed_pass_validate(&pass, 2560, 736, false, false, false, NULL, 0));
+    pass.scissor_enabled = false;
+    REQUIRE(!cc_indexed_pass_validate(&pass, 2560, 736, false, false, false, NULL, 0));
+    pass.scissor_enabled = true;
+    pass.viewport = (CcViewport){0, 0, 1280, 720};
+    pass.scissor = (CcViewport){0, 364, 1280, 372};
+    REQUIRE(cc_indexed_pass_validate(&pass, 1280, 720, false, false, false, NULL, 0));
+    pass.scissor = (CcViewport){0, 292, 720, 300};
+    pass.viewport = (CcViewport){0, -576, 1440, 1152};
+    REQUIRE(cc_indexed_pass_validate(&pass, 1440, 592, false, false, false, NULL, 0));
+    pass.scissor.x = -1;
+    REQUIRE(!cc_indexed_pass_validate(&pass, 1440, 592, false, false, false, NULL, 0));
+    pass.scissor = (CcViewport){INT_MAX, 0, INT_MAX, 0};
+    REQUIRE(cc_indexed_pass_validate(&pass, 1440, 592, false, false, false, NULL, 0));
+    pass.viewport.y = INT_MIN;
+    pass.viewport.height = 1;
+    REQUIRE(!cc_indexed_pass_validate(&pass, 1440, 592, false, false, false, NULL, 0));
+    pass.viewport = (CcViewport){0, 0, 1440, 1152};
+    pass.scissor = (CcViewport){0, INT_MAX, 1, INT_MAX};
+    REQUIRE(!cc_indexed_pass_validate(&pass, 1440, 592, false, false, false, NULL, 0));
+    pass.scissor = (CcViewport){0, 0, -1, 10};
+    REQUIRE(!cc_indexed_pass_validate(&pass, 1440, 592, false, false, false, NULL, 0));
+}
+
 int main(void) {
     program_test();
     mesh_test();
     texture_test();
     frame_uniform_test();
+    target_pass_test();
+    independent_rectangles_test();
     puts("Indexed validation tests passed.");
     return EXIT_SUCCESS;
 }

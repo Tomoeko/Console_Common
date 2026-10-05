@@ -192,6 +192,29 @@ if(APPLE)
         PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
     add_test(NAME cc-indexed-metal COMMAND cc-indexed-metal-test)
     set_tests_properties(cc-indexed-metal PROPERTIES SKIP_RETURN_CODE 77)
+    add_executable(cc-indexed-pass-metal-test platform/indexed_pass_metal_test.m)
+    cc_add_platform(cc-indexed-pass-metal-test metal)
+    set_source_files_properties(platform/indexed_pass_metal_test.m
+        PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+    target_compile_options(cc-indexed-pass-metal-test PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion)
+    add_test(NAME cc-indexed-pass-metal COMMAND cc-indexed-pass-metal-test)
+    set_tests_properties(cc-indexed-pass-metal PROPERTIES SKIP_RETURN_CODE 77)
+
+    add_executable(cc-indexed-pass-gles2-apple-test
+        platform/indexed_pass_gles2_apple_test.c
+        "${common_root}/src/platform/gles2/indexed_gles2.c")
+    target_include_directories(cc-indexed-pass-gles2-apple-test PRIVATE
+        "${common_root}/tests/platform/apple_gl_compat"
+        "${common_root}/src/platform/gles2"
+        "${common_root}/src/render")
+    target_compile_options(cc-indexed-pass-gles2-apple-test PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wno-deprecated-declarations
+        -include "${common_root}/tests/platform/apple_gl_compat/indexed_host.h")
+    target_link_libraries(cc-indexed-pass-gles2-apple-test PRIVATE
+        console_common "-framework OpenGL")
+    add_test(NAME cc-indexed-pass-gles2-apple COMMAND cc-indexed-pass-gles2-apple-test)
+    set_tests_properties(cc-indexed-pass-gles2-apple PROPERTIES SKIP_RETURN_CODE 77)
 endif()
 
 # Texture metadata is independent of a graphics context and is tested on every host.

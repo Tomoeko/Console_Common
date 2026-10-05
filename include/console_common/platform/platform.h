@@ -182,6 +182,11 @@ void cc_platform_end(CcPlatform *platform);
  * fixed at the initial window's backing-pixel size, including its fitted bars.
  * begin writes dimensions with rgba == NULL. After each completed window frame,
  * frame returns top-down RGBA8 pixels including the scene background and fader.
+ * Indexed frames capture their actual drawable without adding a fader. If its
+ * size changes, indexed capture is unavailable until capture restarts. Quad
+ * frames retain their fixed capture target and existing fader behavior.
+ * Begin capture before an indexed frame starts; an already acquired render-only
+ * drawable cannot be read back, so that frame remains unavailable.
  * Pixels are borrowed until the next window frame or capture_end. Offscreen
  * preview targets never replace the captured window frame. Capture calls run
  * on the rendering thread; ordinary rendering performs no readback. */

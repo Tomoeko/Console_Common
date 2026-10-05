@@ -3,6 +3,7 @@
 #include "console_common/render/viewport.h"
 #include "console_common/support/error.h"
 #include "indexed.h"
+#include "indexed_pass.h"
 #include "indexed_gles2.h"
 
 #ifdef _WIN32
@@ -41,9 +42,21 @@ struct CcIndexedMesh {
 };
 
 struct CcIndexedTexture {
+    CcIndexedTarget *target;
     CcIndexedRenderer *owner;
     CcIndexedTexture *next;
     GLuint texture;
+};
+
+struct CcIndexedTarget {
+    CcIndexedRenderer *owner;
+    CcIndexedTarget *next;
+    CcIndexedTexture texture;
+    CcIndexedTargetDescription description;
+    GLuint framebuffer;
+    GLuint depth;
+    bool color_valid;
+    bool depth_valid;
 };
 
 struct CcIndexedRenderer {
@@ -53,9 +66,18 @@ struct CcIndexedRenderer {
     CcIndexedMesh *meshes;
     CcIndexedTexture *textures;
     CcIndexedFrame frame;
+    CcIndexedTarget *targets;
+    CcIndexedPassRecord *passes;
+    size_t pass_capacity;
+    size_t pass_count;
+    int width;
+    int height;
+    GLint viewport_limits[2];
+    bool drawable_pass;
     size_t capacity;
     size_t draw_count;
     bool active;
+    bool failed;
 };
 
 static bool fail(char *error, size_t capacity, const char *message) {
@@ -82,8 +104,23 @@ CcIndexedRenderer *cc_indexed_create(CcPlatform *platform, char *error,
         fail(error, error_capacity, "cannot allocate indexed renderer");
         return NULL;
     }
+    renderer->passes = calloc(1, sizeof(*renderer->passes));
+    if (!renderer->passes) {
+        free(renderer);
+        fail(error, error_capacity, "cannot allocate indexed pass storage");
+        return NULL;
+    }
+    renderer->pass_capacity = 1;
     renderer->host = host;
     renderer->platform = platform;
+    glGetIntegerv(GL_MAX_VIEWPORT_DIMS, renderer->viewport_limits);
+    if (glGetError() != GL_NO_ERROR || renderer->viewport_limits[0] <= 0 ||
+        renderer->viewport_limits[1] <= 0) {
+        free(renderer->passes);
+        free(renderer);
+        fail(error, error_capacity, "indexed viewport limits unavailable");
+        return NULL;
+    }
     return renderer;
 }
 
@@ -116,6 +153,17 @@ void cc_indexed_destroy(CcIndexedRenderer *renderer) {
             glDeleteTextures(1, &texture->texture);
         free(texture);
     }
+    while (renderer->targets) {
+        CcIndexedTarget *target = renderer->targets;
+        renderer->targets = target->next;
+        if (current) {
+            glDeleteFramebuffers(1, &target->framebuffer);
+            glDeleteRenderbuffers(1, &target->depth);
+            glDeleteTextures(1, &target->texture.texture);
+        }
+        free(target);
+    }
+    free(renderer->passes);
     free(renderer);
 }
 
@@ -449,39 +497,39 @@ cc_indexed_texture_create(CcIndexedRenderer *renderer,
     return texture;
 }
 
-bool cc_indexed_begin(CcIndexedRenderer *renderer, const CcIndexedFrame *frame,
-                      char *error, size_t error_capacity) {
+bool cc_indexed_begin_passes(CcIndexedRenderer *renderer, const CcIndexedFrame *frame,
+                             char *error, size_t error_capacity) {
     if (!prepare_resources(renderer, error, error_capacity) ||
         !cc_indexed_frame_validate(frame, error, error_capacity))
         return false;
-    int width = 0;
-    int height = 0;
-    cc_gles2_host_surface_size(renderer->host, &width, &height);
-    if (width <= 0 || height <= 0)
+    cc_gles2_host_surface_size(renderer->host, &renderer->width, &renderer->height);
+    if (renderer->width <= 0 || renderer->height <= 0)
         return fail(error, error_capacity, "indexed drawable has no area");
-    CcViewport viewport = cc_viewport_fit(width, height);
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    glDisable(GL_SCISSOR_TEST);
-    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-    GLbitfield clear = 0;
-    if (frame->clear_color_enabled) {
-        glClearColor(frame->clear_color.r, frame->clear_color.g, frame->clear_color.b,
-                     frame->clear_color.a);
-        clear |= GL_COLOR_BUFFER_BIT;
-    }
-    if (frame->clear_depth_enabled) {
-        glDepthMask(GL_TRUE);
-        glClearDepthf(frame->clear_depth);
-        clear |= GL_DEPTH_BUFFER_BIT;
-    }
-    if (clear)
-        glClear(clear);
-    glViewport(viewport.x, height - viewport.y - viewport.height, viewport.width,
-               viewport.height);
     renderer->frame = *frame;
     renderer->draw_count = 0;
+    renderer->pass_count = 0;
+    renderer->drawable_pass = false;
+    renderer->failed = false;
     renderer->active = true;
     return true;
+}
+
+bool cc_indexed_begin(CcIndexedRenderer *renderer, const CcIndexedFrame *frame,
+                      char *error, size_t error_capacity) {
+    if (!cc_indexed_begin_passes(renderer, frame, error, error_capacity))
+        return false;
+    CcIndexedPass pass = {
+        .viewport = cc_viewport_fit(renderer->width, renderer->height),
+        .color_load = frame->clear_color_enabled ? CC_INDEXED_CLEAR : CC_INDEXED_LOAD,
+        .depth_load = frame->clear_depth_enabled ? CC_INDEXED_CLEAR : CC_INDEXED_LOAD,
+        .clear_color = frame->clear_color,
+        .clear_depth = frame->clear_depth,
+        .depth_attachment = frame->depth_attachment};
+    if (cc_indexed_pass_begin(renderer, &pass, error, error_capacity))
+        return true;
+    renderer->active = false;
+    cc_gles2_platform_invalidate_graphics(renderer->platform);
+    return false;
 }
 
 static void apply_state(const CcIndexedState *state, bool depth_attachment) {
@@ -527,7 +575,8 @@ static void apply_state(const CcIndexedState *state, bool depth_attachment) {
 
 static bool draw_validate(CcIndexedRenderer *renderer, const CcIndexedDraw *draw,
                           char *error, size_t error_capacity) {
-    if (!renderer || !renderer->active || !draw || !draw->program || !draw->mesh ||
+    if (!renderer || !renderer->active || renderer->failed || !renderer->pass_count ||
+        !draw || !draw->program || !draw->mesh ||
         renderer->draw_count >= renderer->capacity ||
         draw->program->owner != renderer || draw->mesh->owner != renderer ||
         draw->mesh->vertex_stride != draw->program->vertex_stride ||
@@ -544,8 +593,27 @@ static bool draw_validate(CcIndexedRenderer *renderer, const CcIndexedDraw *draw
             draw->program->fragment_uniform_count, error, error_capacity))
         return false;
     for (size_t index = 0; index < draw->texture_count; ++index) {
-        if (!draw->textures[index] || draw->textures[index]->owner != renderer)
+        CcIndexedTexture *texture = draw->textures[index];
+        bool member = false;
+        for (CcIndexedTexture *owned = renderer->textures; owned; owned = owned->next)
+            member |= owned == texture;
+        for (CcIndexedTarget *target = renderer->targets; target; target = target->next)
+            member |= &target->texture == texture;
+        if (!member)
             return fail(error, error_capacity, "invalid indexed texture ownership");
+        if (texture->target) {
+            if (renderer->passes[renderer->pass_count - 1].description.target ==
+                texture->target)
+                return fail(error, error_capacity,
+                            "indexed target feedback is unsupported");
+            bool color_valid = texture->target->color_valid;
+            bool depth_valid = texture->target->depth_valid;
+            cc_indexed_pass_content(renderer->passes, renderer->pass_count - 1,
+                                    texture->target, &color_valid, &depth_valid);
+            if (!color_valid)
+                return fail(error, error_capacity,
+                            "indexed target color is uninitialized");
+        }
     }
     return true;
 }
@@ -556,7 +624,9 @@ bool cc_indexed_draw(CcIndexedRenderer *renderer, const CcIndexedDraw *draw,
         return false;
     CcIndexedProgram *program = draw->program;
     glUseProgram(program->program);
-    apply_state(&program->state, renderer->frame.depth_attachment);
+    apply_state(
+        &program->state,
+        renderer->passes[renderer->pass_count - 1].description.depth_attachment);
     glBindBuffer(GL_ARRAY_BUFFER, draw->mesh->vertices);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, draw->mesh->indices);
     for (size_t index = 0; index < CC_INDEXED_ATTRIBUTES; ++index) {
@@ -581,6 +651,7 @@ bool cc_indexed_draw(CcIndexedRenderer *renderer, const CcIndexedDraw *draw,
     glDrawElements(GL_TRIANGLES, (GLsizei)draw->index_count, GL_UNSIGNED_SHORT,
                    (const void *)(draw->first_index * sizeof(uint16_t)));
     ++renderer->draw_count;
+    ++renderer->passes[renderer->pass_count - 1].draw_count;
     return true;
 }
 
@@ -588,8 +659,27 @@ bool cc_indexed_end(CcIndexedRenderer *renderer, char *error, size_t error_capac
     if (!renderer || !renderer->active)
         return fail(error, error_capacity, "indexed frame is not active");
     renderer->active = false;
-    bool valid = glGetError() == GL_NO_ERROR;
-    bool presented = cc_gles2_host_present(renderer->host);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    bool valid = glGetError() == GL_NO_ERROR && !renderer->failed;
+    if (!renderer->drawable_pass) {
+        for (size_t index = 0; index < renderer->pass_count; ++index) {
+            CcIndexedTarget *target = renderer->passes[index].description.target;
+            if (target) {
+                target->color_valid = false;
+                target->depth_valid = false;
+            }
+        }
+        cc_gles2_platform_invalidate_graphics(renderer->platform);
+        return fail(error, error_capacity, "indexed frame has no drawable pass");
+    }
+    for (size_t index = 0; index < renderer->pass_count; ++index) {
+        CcIndexedPassRecord *pass = &renderer->passes[index];
+        if (pass->description.target) {
+            pass->description.target->color_valid = valid && pass->color_valid;
+            pass->description.target->depth_valid = valid && pass->depth_valid;
+        }
+    }
+    bool presented = valid && cc_gles2_host_present(renderer->host);
     cc_gles2_platform_invalidate_graphics(renderer->platform);
     if (!valid || !presented)
         return fail(error, error_capacity, "indexed GLES2 frame failed");
@@ -602,5 +692,214 @@ bool cc_indexed_wait(CcIndexedRenderer *renderer, char *error, size_t error_capa
     glFinish();
     if (glGetError() != GL_NO_ERROR)
         return fail(error, error_capacity, "indexed GLES2 execution failed");
+    return true;
+}
+
+bool cc_indexed_prepare_drawable_depth(CcIndexedRenderer *renderer, char *error,
+                                       size_t error_capacity) {
+    if (!prepare_resources(renderer, error, error_capacity))
+        return false;
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    GLint depth_bits = 0;
+    glGetIntegerv(GL_DEPTH_BITS, &depth_bits);
+    if (depth_bits <= 0 || glGetError() != GL_NO_ERROR)
+        return fail(error, error_capacity, "indexed drawable has no depth storage");
+    return true;
+}
+
+bool cc_indexed_reserve_passes(CcIndexedRenderer *renderer, size_t pass_count,
+                               char *error, size_t error_capacity) {
+    if (!prepare_resources(renderer, error, error_capacity))
+        return false;
+    if (pass_count > SIZE_MAX / sizeof(*renderer->passes))
+        return fail(error, error_capacity, "indexed pass capacity overflows storage");
+    if (pass_count <= renderer->pass_capacity)
+        return true;
+    CcIndexedPassRecord *passes = calloc(pass_count, sizeof(*passes));
+    if (!passes)
+        return fail(error, error_capacity, "cannot allocate indexed pass storage");
+    free(renderer->passes);
+    renderer->passes = passes;
+    renderer->pass_capacity = pass_count;
+    return true;
+}
+
+static void delete_target(CcIndexedTarget *target) {
+    glDeleteFramebuffers(1, &target->framebuffer);
+    glDeleteRenderbuffers(1, &target->depth);
+    glDeleteTextures(1, &target->texture.texture);
+    free(target);
+}
+
+CcIndexedTarget *cc_indexed_target_create(CcIndexedRenderer *renderer,
+                                          const CcIndexedTargetDescription *description,
+                                          char *error, size_t error_capacity) {
+    if (!prepare_resources(renderer, error, error_capacity) ||
+        !cc_indexed_target_validate(description, error, error_capacity))
+        return NULL;
+    if (description->color_format != CC_INDEXED_RGBA8) {
+        fail(error, error_capacity,
+             "indexed half-float targets are unsupported by core GLES2");
+        return NULL;
+    }
+    GLint maximum = 0;
+    glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maximum);
+    GLint depth_maximum = 0;
+    glGetIntegerv(GL_MAX_RENDERBUFFER_SIZE, &depth_maximum);
+    if (maximum <= 0 || description->width > (unsigned)maximum ||
+        description->height > (unsigned)maximum ||
+        (description->depth_attachment &&
+         (depth_maximum <= 0 || description->width > (unsigned)depth_maximum ||
+          description->height > (unsigned)depth_maximum))) {
+        fail(error, error_capacity, "indexed target exceeds GLES2 attachment limit");
+        return NULL;
+    }
+    CcIndexedTarget *target = calloc(1, sizeof(*target));
+    if (!target) {
+        fail(error, error_capacity, "cannot allocate indexed target handle");
+        return NULL;
+    }
+    glGenTextures(1, &target->texture.texture);
+    glBindTexture(GL_TEXTURE_2D, target->texture.texture);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+                    description->min_filter == CC_INDEXED_LINEAR ? GL_LINEAR
+                                                                 : GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER,
+                    description->mag_filter == CC_INDEXED_LINEAR ? GL_LINEAR
+                                                                 : GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, (GLsizei)description->width,
+                 (GLsizei)description->height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glGenFramebuffers(1, &target->framebuffer);
+    glBindFramebuffer(GL_FRAMEBUFFER, target->framebuffer);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                           target->texture.texture, 0);
+    if (description->depth_attachment) {
+        glGenRenderbuffers(1, &target->depth);
+        glBindRenderbuffer(GL_RENDERBUFFER, target->depth);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT16,
+                              (GLsizei)description->width,
+                              (GLsizei)description->height);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER,
+                                  target->depth);
+    }
+    bool complete = glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glBindRenderbuffer(GL_RENDERBUFFER, 0);
+    if (!target->texture.texture || !target->framebuffer ||
+        (description->depth_attachment && !target->depth) || !complete ||
+        glGetError() != GL_NO_ERROR) {
+        delete_target(target);
+        fail(error, error_capacity, "cannot create complete indexed GLES2 target");
+        return NULL;
+    }
+    target->owner = renderer;
+    target->description = *description;
+    target->texture.owner = renderer;
+    target->texture.target = target;
+    target->next = renderer->targets;
+    renderer->targets = target;
+    return target;
+}
+
+CcIndexedTexture *cc_indexed_target_texture(CcIndexedRenderer *renderer,
+                                            CcIndexedTarget *target) {
+    if (!renderer)
+        return NULL;
+    for (CcIndexedTarget *member = renderer->targets; member; member = member->next) {
+        if (member == target)
+            return &member->texture;
+    }
+    return NULL;
+}
+
+bool cc_indexed_target_release(CcIndexedRenderer *renderer, CcIndexedTarget **target,
+                               char *error, size_t error_capacity) {
+    if (!target || !prepare_resources(renderer, error, error_capacity))
+        return false;
+    if (!*target)
+        return true;
+    CcIndexedTarget **slot = &renderer->targets;
+    while (*slot && *slot != *target)
+        slot = &(*slot)->next;
+    if (!*slot)
+        return fail(error, error_capacity,
+                    "indexed target belongs to another renderer");
+    CcIndexedTarget *released = *slot;
+    *slot = released->next;
+    delete_target(released);
+    *target = NULL;
+    return true;
+}
+
+bool cc_indexed_pass_begin(CcIndexedRenderer *renderer, const CcIndexedPass *pass,
+                           char *error, size_t error_capacity) {
+    if (!renderer || !renderer->active || renderer->failed || !pass ||
+        renderer->pass_count >= renderer->pass_capacity)
+        return fail(error, error_capacity,
+                    "indexed pass state or capacity unavailable");
+    CcIndexedTarget *target = NULL;
+    if (pass->target) {
+        for (CcIndexedTarget *member = renderer->targets; member;
+             member = member->next) {
+            if (member == pass->target)
+                target = member;
+        }
+        if (!target)
+            return fail(error, error_capacity,
+                        "indexed target belongs to another renderer");
+    }
+    unsigned width = target ? target->description.width : (unsigned)renderer->width;
+    unsigned height = target ? target->description.height : (unsigned)renderer->height;
+    bool color_valid = target ? target->color_valid : true;
+    bool depth_valid = target ? target->depth_valid : true;
+    if (target)
+        cc_indexed_pass_content(renderer->passes, renderer->pass_count, target,
+                                &color_valid, &depth_valid);
+    bool depth_available = target ? target->description.depth_attachment
+                                  : renderer->frame.depth_attachment;
+    if (!cc_indexed_pass_validate(pass, width, height, depth_available, color_valid,
+                                  depth_valid, error, error_capacity))
+        return false;
+    if (pass->viewport.width > renderer->viewport_limits[0] ||
+        pass->viewport.height > renderer->viewport_limits[1])
+        return fail(error, error_capacity, "indexed viewport exceeds GLES2 dimensions");
+    glBindFramebuffer(GL_FRAMEBUFFER, target ? target->framebuffer : 0);
+    glDisable(GL_SCISSOR_TEST);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    GLbitfield clear = 0;
+    if (pass->color_load == CC_INDEXED_CLEAR) {
+        glClearColor(pass->clear_color.r, pass->clear_color.g, pass->clear_color.b,
+                     pass->clear_color.a);
+        clear |= GL_COLOR_BUFFER_BIT;
+    }
+    if (pass->depth_attachment && pass->depth_load == CC_INDEXED_CLEAR) {
+        glDepthMask(GL_TRUE);
+        glClearDepthf(pass->clear_depth);
+        clear |= GL_DEPTH_BUFFER_BIT;
+    }
+    /* DISCARD requires no optional invalidate extension. Contents are undefined
+     * until the caller's declared complete writes finish. */
+    if (clear)
+        glClear(clear);
+    CcViewport viewport = pass->viewport;
+    GLint bottom = (GLint)((int64_t)height - viewport.y - viewport.height);
+    glViewport(viewport.x, bottom, viewport.width, viewport.height);
+    CcViewport scissor = cc_indexed_pass_scissor(pass);
+    GLint scissor_bottom = (GLint)((int64_t)height - scissor.y - scissor.height);
+    glScissor(scissor.x, scissor_bottom, scissor.width, scissor.height);
+    glEnable(GL_SCISSOR_TEST);
+    if (glGetError() != GL_NO_ERROR) {
+        renderer->failed = true;
+        if (target) {
+            target->color_valid = false;
+            target->depth_valid = false;
+        }
+        return fail(error, error_capacity, "cannot begin indexed GLES2 pass");
+    }
+    renderer->passes[renderer->pass_count++] =
+        cc_indexed_pass_record(pass, renderer->draw_count, color_valid, depth_valid);
+    renderer->drawable_pass |= target == NULL;
     return true;
 }

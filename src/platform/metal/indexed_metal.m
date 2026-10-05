@@ -3,6 +3,7 @@
 #include "console_common/render/viewport.h"
 #include "console_common/support/error.h"
 #include "indexed.h"
+#include "indexed_pass.h"
 #include "platform_metal_internal.h"
 
 #include <limits.h>
@@ -12,9 +13,10 @@
 
 enum { CC_INDEXED_UNIFORM_BYTES = CC_INDEXED_UNIFORMS * 4 * sizeof(float) };
 
-@interface CcIndexedMetalProgram : NSObject
-@property(nonatomic, strong) id<MTLRenderPipelineState> colorPipeline;
-@property(nonatomic, strong) id<MTLRenderPipelineState> depthPipeline;
+@interface CcIndexedMetalProgram : NSObject {
+  @public
+    id<MTLRenderPipelineState> pipelines[3][2];
+}
 @property(nonatomic, strong) id<MTLDepthStencilState> depthState;
 @property(nonatomic, strong) id<MTLDepthStencilState> disabledDepthState;
 @end
@@ -33,6 +35,7 @@ enum { CC_INDEXED_UNIFORM_BYTES = CC_INDEXED_UNIFORMS * 4 * sizeof(float) };
 
 @interface CcIndexedMetalTexture : NSObject
 @property(nonatomic, strong) id<MTLTexture> texture;
+@property(nonatomic, strong) id<MTLTexture> depth;
 @property(nonatomic, strong) id<MTLSamplerState> sampler;
 @end
 @implementation CcIndexedMetalTexture
@@ -75,9 +78,19 @@ struct CcIndexedMesh {
 };
 
 struct CcIndexedTexture {
+    CcIndexedTarget *target;
     CcIndexedRenderer *owner;
     CcIndexedTexture *next;
     void *objects;
+};
+
+struct CcIndexedTarget {
+    CcIndexedRenderer *owner;
+    CcIndexedTarget *next;
+    CcIndexedTexture texture;
+    CcIndexedTargetDescription description;
+    bool color_valid;
+    bool depth_valid;
 };
 
 typedef struct CcIndexedMetalDraw {
@@ -95,6 +108,11 @@ struct CcIndexedRenderer {
     CcIndexedProgram *programs;
     CcIndexedMesh *meshes;
     CcIndexedTexture *textures;
+    CcIndexedTarget *targets;
+    CcIndexedPassRecord *passes;
+    size_t pass_capacity;
+    size_t pass_count;
+    bool drawable_pass;
     CcIndexedMetalDraw *draws;
     size_t capacity;
     size_t draw_count;
@@ -127,6 +145,13 @@ static bool prepare_resources(CcIndexedRenderer *renderer, char *error,
     return true;
 }
 
+static void invalidate_targets(CcIndexedRenderer *renderer) {
+    for (CcIndexedTarget *target = renderer->targets; target; target = target->next) {
+        target->color_valid = false;
+        target->depth_valid = false;
+    }
+}
+
 static CcIndexedRenderer *create_renderer(CcPlatform *platform, char *error,
                                           size_t error_capacity) {
     CcMetalState *state = cc_metal_platform_state(platform);
@@ -139,6 +164,13 @@ static CcIndexedRenderer *create_renderer(CcPlatform *platform, char *error,
         fail(error, error_capacity, "cannot allocate indexed renderer");
         return NULL;
     }
+    renderer->passes = calloc(1, sizeof(*renderer->passes));
+    if (!renderer->passes) {
+        free(renderer);
+        fail(error, error_capacity, "cannot allocate indexed pass storage");
+        return NULL;
+    }
+    renderer->pass_capacity = 1;
     CcIndexedMetalFrames *frames = [CcIndexedMetalFrames new];
     frames.pass = [MTLRenderPassDescriptor renderPassDescriptor];
     renderer->platform = platform;
@@ -177,7 +209,14 @@ void cc_indexed_destroy(CcIndexedRenderer *renderer) {
         (void)CFBridgingRelease(texture->objects);
         free(texture);
     }
+    while (renderer->targets) {
+        CcIndexedTarget *target = renderer->targets;
+        renderer->targets = target->next;
+        (void)CFBridgingRelease(target->texture.objects);
+        free(target);
+    }
     (void)CFBridgingRelease(renderer->objects);
+    free(renderer->passes);
     free(renderer->draws);
     free(renderer);
 }
@@ -348,18 +387,23 @@ static CcIndexedProgram *create_program(CcIndexedRenderer *renderer,
         pipeline_description(native, description, vertex, fragment);
     CcIndexedMetalProgram *objects = [CcIndexedMetalProgram new];
     NSError *diagnostic = nil;
-    objects.colorPipeline =
-        [native->device newRenderPipelineStateWithDescriptor:pipeline
-                                                       error:&diagnostic];
-    if (!objects.colorPipeline) {
-        metal_error(error, error_capacity, diagnostic,
-                    "invalid indexed Metal pipeline");
-        return NULL;
+    const MTLPixelFormat formats[] = {
+        native->layer.pixelFormat, MTLPixelFormatRGBA8Unorm, MTLPixelFormatRGBA16Float};
+    for (size_t format = 0; format < 3; ++format) {
+        pipeline.colorAttachments[0].pixelFormat = formats[format];
+        for (size_t attachment = 0; attachment < 2; ++attachment) {
+            pipeline.depthAttachmentPixelFormat =
+                attachment ? MTLPixelFormatDepth32Float : MTLPixelFormatInvalid;
+            objects->pipelines[format][attachment] =
+                [native->device newRenderPipelineStateWithDescriptor:pipeline
+                                                               error:&diagnostic];
+            if (!objects->pipelines[format][attachment]) {
+                metal_error(error, error_capacity, diagnostic,
+                            "invalid indexed Metal target pipeline");
+                return NULL;
+            }
+        }
     }
-    pipeline.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
-    objects.depthPipeline =
-        [native->device newRenderPipelineStateWithDescriptor:pipeline
-                                                       error:&diagnostic];
     MTLDepthStencilDescriptor *depth = [MTLDepthStencilDescriptor new];
     depth.depthWriteEnabled =
         description->state.depth_write && description->state.depth_test;
@@ -372,7 +416,7 @@ static CcIndexedProgram *create_program(CcIndexedRenderer *renderer,
     depth.depthCompareFunction = MTLCompareFunctionAlways;
     objects.disabledDepthState =
         [native->device newDepthStencilStateWithDescriptor:depth];
-    if (!objects.depthPipeline || !objects.depthState || !objects.disabledDepthState) {
+    if (!objects.depthState || !objects.disabledDepthState) {
         metal_error(error, error_capacity, diagnostic,
                     "cannot create indexed Metal depth state");
         return NULL;
@@ -550,16 +594,15 @@ static bool prepare_drawable(CcIndexedRenderer *renderer, char *error,
     return true;
 }
 
-static bool prepare_depth(CcIndexedRenderer *renderer, size_t slot, char *error,
+static bool prepare_depth(CcIndexedRenderer *renderer, size_t slot, NSUInteger width,
+                          NSUInteger height, bool allocate, char *error,
                           size_t error_capacity) {
-    if (!renderer->frame.depth_attachment)
-        return true;
     CcIndexedMetalFrames *frames = (__bridge CcIndexedMetalFrames *)renderer->objects;
-    NSUInteger width = frames.drawable.texture.width;
-    NSUInteger height = frames.drawable.texture.height;
     id<MTLTexture> depth = frames->depth[slot];
     if (depth && depth.width == width && depth.height == height)
         return true;
+    if (!allocate)
+        return fail(error, error_capacity, "indexed drawable depth needs preparation");
     MTLTextureDescriptor *layout = [MTLTextureDescriptor
         texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float
                                      width:width
@@ -575,14 +618,20 @@ static bool prepare_depth(CcIndexedRenderer *renderer, size_t slot, char *error,
 }
 
 static bool begin_frame(CcIndexedRenderer *renderer, const CcIndexedFrame *frame,
-                        char *error, size_t error_capacity) {
+                        char *error, size_t error_capacity, bool wait_slot) {
     if (!prepare_resources(renderer, error, error_capacity) ||
         !cc_indexed_frame_validate(frame, error, error_capacity))
         return false;
     CcIndexedMetalFrames *frames = (__bridge CcIndexedMetalFrames *)renderer->objects;
     size_t slot = renderer->frame_number % CC_IN_FLIGHT_FRAMES;
-    [frames->commands[slot] waitUntilCompleted];
+    if (wait_slot) {
+        [frames->commands[slot] waitUntilCompleted];
+    } else if (frames->commands[slot] &&
+               frames->commands[slot].status < MTLCommandBufferStatusCompleted) {
+        return fail(error, error_capacity, "indexed frame storage is still in flight");
+    }
     if (frames->commands[slot].status == MTLCommandBufferStatusError) {
+        invalidate_targets(renderer);
         metal_error(error, error_capacity, frames->commands[slot].error,
                     "previous indexed Metal frame failed");
         frames->commands[slot] = nil;
@@ -599,19 +648,24 @@ static bool begin_frame(CcIndexedRenderer *renderer, const CcIndexedFrame *frame
     }
     renderer->frame = *frame;
     if (!prepare_drawable(renderer, error, error_capacity) ||
-        !prepare_depth(renderer, slot, error, error_capacity)) {
+        (frame->depth_attachment &&
+         !prepare_depth(renderer, slot, frames.drawable.texture.width,
+                        frames.drawable.texture.height, wait_slot, error,
+                        error_capacity))) {
         frames.drawable = nil;
         return false;
     }
     renderer->draw_count = 0;
+    renderer->pass_count = 0;
+    renderer->drawable_pass = false;
     renderer->active = true;
     return true;
 }
 
 static bool draw_validate(CcIndexedRenderer *renderer, const CcIndexedDraw *draw,
                           char *error, size_t error_capacity) {
-    if (!renderer || !renderer->active || !draw || !draw->program || !draw->mesh ||
-        renderer->draw_count >= renderer->capacity ||
+    if (!renderer || !renderer->active || !renderer->pass_count || !draw ||
+        !draw->program || !draw->mesh || renderer->draw_count >= renderer->capacity ||
         draw->program->owner != renderer || draw->mesh->owner != renderer ||
         draw->mesh->vertex_stride != draw->program->vertex_stride ||
         draw->first_index > draw->mesh->index_count ||
@@ -627,8 +681,27 @@ static bool draw_validate(CcIndexedRenderer *renderer, const CcIndexedDraw *draw
             draw->program->fragment_uniform_count, error, error_capacity))
         return false;
     for (size_t index = 0; index < draw->texture_count; ++index) {
-        if (!draw->textures[index] || draw->textures[index]->owner != renderer)
+        CcIndexedTexture *texture = draw->textures[index];
+        bool member = false;
+        for (CcIndexedTexture *owned = renderer->textures; owned; owned = owned->next)
+            member |= owned == texture;
+        for (CcIndexedTarget *target = renderer->targets; target; target = target->next)
+            member |= &target->texture == texture;
+        if (!member)
             return fail(error, error_capacity, "invalid indexed texture ownership");
+        if (texture->target) {
+            if (renderer->passes[renderer->pass_count - 1].description.target ==
+                texture->target)
+                return fail(error, error_capacity,
+                            "indexed target feedback is unsupported");
+            bool color_valid = texture->target->color_valid;
+            bool depth_valid = texture->target->depth_valid;
+            cc_indexed_pass_content(renderer->passes, renderer->pass_count - 1,
+                                    texture->target, &color_valid, &depth_valid);
+            if (!color_valid)
+                return fail(error, error_capacity,
+                            "indexed target color is uninitialized");
+        }
     }
     return true;
 }
@@ -656,19 +729,18 @@ bool cc_indexed_draw(CcIndexedRenderer *renderer, const CcIndexedDraw *draw,
         memcpy(uniforms + offset + CC_INDEXED_UNIFORM_BYTES, draw->fragment_uniforms,
                draw->fragment_uniform_count * sizeof(float) * 4);
     ++renderer->draw_count;
+    ++renderer->passes[renderer->pass_count - 1].draw_count;
     return true;
 }
 
 static void encode_draw(CcIndexedRenderer *renderer,
                         id<MTLRenderCommandEncoder> encoder, size_t index,
-                        id<MTLBuffer> uniforms) {
+                        id<MTLBuffer> uniforms, bool depth, size_t format) {
     const CcIndexedMetalDraw *draw = &renderer->draws[index];
     const CcIndexedProgram *program = draw->program;
     CcIndexedMetalProgram *objects = (__bridge CcIndexedMetalProgram *)program->objects;
     CcIndexedMetalMesh *mesh = (__bridge CcIndexedMetalMesh *)draw->mesh->objects;
-    bool depth = renderer->frame.depth_attachment;
-    [encoder
-        setRenderPipelineState:depth ? objects.depthPipeline : objects.colorPipeline];
+    [encoder setRenderPipelineState:objects->pipelines[format][depth ? 1 : 0]];
     [encoder
         setDepthStencilState:depth ? objects.depthState : objects.disabledDepthState];
     [encoder setBlendColorRed:program->state.blend_color[0]
@@ -707,49 +779,99 @@ static void encode_draw(CcIndexedRenderer *renderer,
                  indexBufferOffset:draw->first_index * sizeof(uint16_t)];
 }
 
+static MTLLoadAction load_action(CcIndexedLoad action) {
+    static const MTLLoadAction actions[] = {MTLLoadActionLoad, MTLLoadActionClear,
+                                            MTLLoadActionDontCare};
+    return actions[action];
+}
+
+static bool encode_pass(CcIndexedRenderer *renderer, id<MTLCommandBuffer> commands,
+                        size_t pass_index, size_t slot) {
+    CcIndexedMetalFrames *frames = (__bridge CcIndexedMetalFrames *)renderer->objects;
+    const CcIndexedPassRecord *record = &renderer->passes[pass_index];
+    const CcIndexedPass *pass = &record->description;
+    CcIndexedMetalTexture *target =
+        pass->target ? (__bridge CcIndexedMetalTexture *)pass->target->texture.objects
+                     : nil;
+    MTLRenderPassColorAttachmentDescriptor *color = frames.pass.colorAttachments[0];
+    color.texture = target ? target.texture : frames.drawable.texture;
+    color.loadAction = load_action(pass->color_load);
+    color.storeAction = MTLStoreActionStore;
+    CcColor clear = pass->clear_color;
+    color.clearColor = MTLClearColorMake(clear.r, clear.g, clear.b, clear.a);
+    frames.pass.depthAttachment.texture =
+        pass->depth_attachment ? (target ? target.depth : frames->depth[slot]) : nil;
+    frames.pass.depthAttachment.loadAction = load_action(pass->depth_load);
+    frames.pass.depthAttachment.storeAction = MTLStoreActionStore;
+    frames.pass.depthAttachment.clearDepth = pass->clear_depth;
+    id<MTLRenderCommandEncoder> encoder =
+        [commands renderCommandEncoderWithDescriptor:frames.pass];
+    color.texture = nil;
+    frames.pass.depthAttachment.texture = nil;
+    if (!encoder)
+        return false;
+    CcViewport viewport = pass->viewport;
+    [encoder setViewport:(MTLViewport){viewport.x, viewport.y, viewport.width,
+                                       viewport.height, 0.0, 1.0}];
+    CcViewport scissor = cc_indexed_pass_scissor_clip(
+        pass, (unsigned)(target ? target.texture.width : frames.drawable.texture.width),
+        (unsigned)(target ? target.texture.height : frames.drawable.texture.height));
+    if (scissor.width == 0 || scissor.height == 0) {
+        [encoder endEncoding];
+        return true;
+    }
+    [encoder setScissorRect:(MTLScissorRect){
+                                (NSUInteger)scissor.x, (NSUInteger)scissor.y,
+                                (NSUInteger)scissor.width, (NSUInteger)scissor.height}];
+    size_t format = pass->target ? 1 + pass->target->description.color_format : 0;
+    for (size_t index = record->first_draw;
+         index < record->first_draw + record->draw_count; ++index)
+        encode_draw(renderer, encoder, index, frames->uniforms[slot],
+                    pass->depth_attachment, format);
+    [encoder endEncoding];
+    return true;
+}
+
 static bool end_frame(CcIndexedRenderer *renderer, char *error, size_t error_capacity) {
     if (!renderer || !renderer->active)
         return fail(error, error_capacity, "indexed frame is not active");
     renderer->active = false;
     CcIndexedMetalFrames *frames = (__bridge CcIndexedMetalFrames *)renderer->objects;
+    if (!renderer->drawable_pass) {
+        frames.drawable = nil;
+        return fail(error, error_capacity, "indexed frame has no drawable pass");
+    }
     size_t slot = renderer->frame_number % CC_IN_FLIGHT_FRAMES;
     CcMetalState *native = native_state(renderer);
     id<MTLCommandBuffer> commands = [native->command_queue commandBuffer];
-    MTLRenderPassColorAttachmentDescriptor *color = frames.pass.colorAttachments[0];
-    color.texture = frames.drawable.texture;
-    color.loadAction =
-        renderer->frame.clear_color_enabled ? MTLLoadActionClear : MTLLoadActionLoad;
-    color.storeAction = MTLStoreActionStore;
-    CcColor clear = renderer->frame.clear_color;
-    color.clearColor = MTLClearColorMake(clear.r, clear.g, clear.b, clear.a);
-    frames.pass.depthAttachment.texture =
-        renderer->frame.depth_attachment ? frames->depth[slot] : nil;
-    frames.pass.depthAttachment.loadAction =
-        renderer->frame.clear_depth_enabled ? MTLLoadActionClear : MTLLoadActionLoad;
-    frames.pass.depthAttachment.storeAction = MTLStoreActionStore;
-    frames.pass.depthAttachment.clearDepth = renderer->frame.clear_depth;
-    id<MTLRenderCommandEncoder> encoder =
-        [commands renderCommandEncoderWithDescriptor:frames.pass];
-    color.texture = nil;
-    frames.pass.depthAttachment.texture = nil;
-    if (!commands || !encoder) {
+    if (!commands) {
         frames.drawable = nil;
-        return fail(error, error_capacity, "cannot encode indexed Metal frame");
+        return fail(error, error_capacity,
+                    "cannot create indexed Metal command buffer");
     }
-    CcViewport viewport = renderer->viewport;
-    [encoder setViewport:(MTLViewport){viewport.x, viewport.y, viewport.width,
-                                       viewport.height, 0.0, 1.0}];
-    MTLScissorRect scissor = {(NSUInteger)viewport.x, (NSUInteger)viewport.y,
-                              (NSUInteger)viewport.width, (NSUInteger)viewport.height};
-    [encoder setScissorRect:scissor];
-    for (size_t index = 0; index < renderer->draw_count; ++index)
-        encode_draw(renderer, encoder, index, frames->uniforms[slot]);
-    [encoder endEncoding];
+    for (size_t index = 0; index < renderer->pass_count; ++index) {
+        if (!encode_pass(renderer, commands, index, slot)) {
+            frames.drawable = nil;
+            return fail(error, error_capacity, "cannot encode indexed Metal pass");
+        }
+    }
+    native->capture_ready = false;
+    bool capturing = native->capture_texture &&
+                     cc_metal_encode_capture(native, commands, frames.drawable.texture);
     [commands presentDrawable:frames.drawable];
     [commands commit];
     frames->commands[slot] = commands;
+    for (size_t index = 0; index < renderer->pass_count; ++index) {
+        CcIndexedPassRecord *pass = &renderer->passes[index];
+        if (pass->description.target) {
+            pass->description.target->color_valid = pass->color_valid;
+            pass->description.target->depth_valid = pass->depth_valid;
+        }
+    }
     frames.drawable = nil;
     ++renderer->frame_number;
+    if (capturing)
+        cc_metal_complete_capture(native, commands);
     return true;
 }
 
@@ -762,6 +884,7 @@ static bool wait_frames(CcIndexedRenderer *renderer, char *error,
     for (size_t index = 0; index < CC_IN_FLIGHT_FRAMES; ++index) {
         [frames->commands[index] waitUntilCompleted];
         if (frames->commands[index].status == MTLCommandBufferStatusError) {
+            invalidate_targets(renderer);
             metal_error(error, error_capacity, frames->commands[index].error,
                         "indexed Metal execution failed");
             valid = false;
@@ -915,7 +1038,24 @@ cc_indexed_texture_create(CcIndexedRenderer *renderer,
 bool cc_indexed_begin(CcIndexedRenderer *renderer, const CcIndexedFrame *frame,
                       char *error, size_t error_capacity) {
     @autoreleasepool {
-        return begin_frame(renderer, frame, error, error_capacity);
+        if (!begin_frame(renderer, frame, error, error_capacity, true))
+            return false;
+        CcIndexedPass pass = {
+            .viewport = renderer->viewport,
+            .color_load =
+                frame->clear_color_enabled ? CC_INDEXED_CLEAR : CC_INDEXED_LOAD,
+            .depth_load =
+                frame->clear_depth_enabled ? CC_INDEXED_CLEAR : CC_INDEXED_LOAD,
+            .clear_color = frame->clear_color,
+            .clear_depth = frame->clear_depth,
+            .depth_attachment = frame->depth_attachment};
+        if (cc_indexed_pass_begin(renderer, &pass, error, error_capacity))
+            return true;
+        renderer->active = false;
+        CcIndexedMetalFrames *frames =
+            (__bridge CcIndexedMetalFrames *)renderer->objects;
+        frames.drawable = nil;
+        return false;
     }
 }
 
@@ -928,5 +1068,187 @@ bool cc_indexed_end(CcIndexedRenderer *renderer, char *error, size_t error_capac
 bool cc_indexed_wait(CcIndexedRenderer *renderer, char *error, size_t error_capacity) {
     @autoreleasepool {
         return wait_frames(renderer, error, error_capacity);
+    }
+}
+
+bool cc_indexed_reserve_passes(CcIndexedRenderer *renderer, size_t pass_count,
+                               char *error, size_t error_capacity) {
+    if (!prepare_resources(renderer, error, error_capacity))
+        return false;
+    if (pass_count > SIZE_MAX / sizeof(*renderer->passes))
+        return fail(error, error_capacity, "indexed pass capacity overflows storage");
+    if (pass_count <= renderer->pass_capacity)
+        return true;
+    CcIndexedPassRecord *passes = calloc(pass_count, sizeof(*passes));
+    if (!passes)
+        return fail(error, error_capacity, "cannot allocate indexed pass storage");
+    free(renderer->passes);
+    renderer->passes = passes;
+    renderer->pass_capacity = pass_count;
+    return true;
+}
+
+static CcIndexedTarget *create_target(CcIndexedRenderer *renderer,
+                                      const CcIndexedTargetDescription *description,
+                                      char *error, size_t error_capacity) {
+    if (!prepare_resources(renderer, error, error_capacity) ||
+        !cc_indexed_target_validate(description, error, error_capacity))
+        return NULL;
+    if (description->width > 16384 || description->height > 16384) {
+        fail(error, error_capacity, "indexed target exceeds Metal 2D limit");
+        return NULL;
+    }
+    CcMetalState *native = native_state(renderer);
+    MTLPixelFormat format = description->color_format == CC_INDEXED_RGBA8
+                                ? MTLPixelFormatRGBA8Unorm
+                                : MTLPixelFormatRGBA16Float;
+    MTLTextureDescriptor *layout =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format
+                                                           width:description->width
+                                                          height:description->height
+                                                       mipmapped:NO];
+    layout.storageMode = MTLStorageModePrivate;
+    layout.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+    CcIndexedMetalTexture *objects = [CcIndexedMetalTexture new];
+    objects.texture = [native->device newTextureWithDescriptor:layout];
+    if (description->depth_attachment) {
+        layout.pixelFormat = MTLPixelFormatDepth32Float;
+        layout.usage = MTLTextureUsageRenderTarget;
+        objects.depth = [native->device newTextureWithDescriptor:layout];
+    }
+    MTLSamplerDescriptor *sampler = [MTLSamplerDescriptor new];
+    sampler.minFilter = description->min_filter == CC_INDEXED_LINEAR
+                            ? MTLSamplerMinMagFilterLinear
+                            : MTLSamplerMinMagFilterNearest;
+    sampler.magFilter = description->mag_filter == CC_INDEXED_LINEAR
+                            ? MTLSamplerMinMagFilterLinear
+                            : MTLSamplerMinMagFilterNearest;
+    sampler.mipFilter = MTLSamplerMipFilterNotMipmapped;
+    sampler.sAddressMode = MTLSamplerAddressModeClampToEdge;
+    sampler.tAddressMode = MTLSamplerAddressModeClampToEdge;
+    objects.sampler = [native->device newSamplerStateWithDescriptor:sampler];
+    if (!objects.texture || !objects.sampler ||
+        (description->depth_attachment && !objects.depth)) {
+        fail(error, error_capacity, "cannot allocate indexed Metal target");
+        return NULL;
+    }
+    CcIndexedTarget *target = calloc(1, sizeof(*target));
+    if (!target) {
+        fail(error, error_capacity, "cannot allocate indexed target handle");
+        return NULL;
+    }
+    target->owner = renderer;
+    target->description = *description;
+    target->texture.owner = renderer;
+    target->texture.target = target;
+    target->texture.objects = (__bridge_retained void *)objects;
+    target->next = renderer->targets;
+    renderer->targets = target;
+    return target;
+}
+
+CcIndexedTarget *cc_indexed_target_create(CcIndexedRenderer *renderer,
+                                          const CcIndexedTargetDescription *description,
+                                          char *error, size_t error_capacity) {
+    @autoreleasepool {
+        return create_target(renderer, description, error, error_capacity);
+    }
+}
+
+CcIndexedTexture *cc_indexed_target_texture(CcIndexedRenderer *renderer,
+                                            CcIndexedTarget *target) {
+    if (!renderer)
+        return NULL;
+    for (CcIndexedTarget *member = renderer->targets; member; member = member->next) {
+        if (member == target)
+            return &member->texture;
+    }
+    return NULL;
+}
+
+bool cc_indexed_target_release(CcIndexedRenderer *renderer, CcIndexedTarget **target,
+                               char *error, size_t error_capacity) {
+    if (!target || !prepare_resources(renderer, error, error_capacity))
+        return false;
+    if (!*target)
+        return true;
+    CcIndexedTarget **slot = &renderer->targets;
+    while (*slot && *slot != *target)
+        slot = &(*slot)->next;
+    if (!*slot)
+        return fail(error, error_capacity,
+                    "indexed target belongs to another renderer");
+    CcIndexedTarget *released = *slot;
+    *slot = released->next;
+    (void)CFBridgingRelease(released->texture.objects);
+    free(released);
+    *target = NULL;
+    return true;
+}
+
+bool cc_indexed_begin_passes(CcIndexedRenderer *renderer, const CcIndexedFrame *frame,
+                             char *error, size_t error_capacity) {
+    @autoreleasepool {
+        return begin_frame(renderer, frame, error, error_capacity, false);
+    }
+}
+
+bool cc_indexed_pass_begin(CcIndexedRenderer *renderer, const CcIndexedPass *pass,
+                           char *error, size_t error_capacity) {
+    if (!renderer || !renderer->active || !pass ||
+        renderer->pass_count >= renderer->pass_capacity)
+        return fail(error, error_capacity,
+                    "indexed pass state or capacity unavailable");
+    CcIndexedTarget *target = NULL;
+    if (pass->target) {
+        for (CcIndexedTarget *member = renderer->targets; member;
+             member = member->next) {
+            if (member == pass->target)
+                target = member;
+        }
+        if (!target)
+            return fail(error, error_capacity,
+                        "indexed target belongs to another renderer");
+    }
+    CcIndexedMetalFrames *frames = (__bridge CcIndexedMetalFrames *)renderer->objects;
+    unsigned width =
+        target ? target->description.width : (unsigned)frames.drawable.texture.width;
+    unsigned height =
+        target ? target->description.height : (unsigned)frames.drawable.texture.height;
+    bool color_valid = target ? target->color_valid : true;
+    bool depth_valid = target ? target->depth_valid : true;
+    if (target)
+        cc_indexed_pass_content(renderer->passes, renderer->pass_count, target,
+                                &color_valid, &depth_valid);
+    bool depth_available = target ? target->description.depth_attachment
+                                  : renderer->frame.depth_attachment;
+    if (!cc_indexed_pass_validate(pass, width, height, depth_available, color_valid,
+                                  depth_valid, error, error_capacity))
+        return false;
+    renderer->passes[renderer->pass_count++] =
+        cc_indexed_pass_record(pass, renderer->draw_count, color_valid, depth_valid);
+    renderer->drawable_pass |= target == NULL;
+    return true;
+}
+
+bool cc_indexed_prepare_drawable_depth(CcIndexedRenderer *renderer, char *error,
+                                       size_t error_capacity) {
+    @autoreleasepool {
+        if (!prepare_resources(renderer, error, error_capacity))
+            return false;
+        CcMetalState *native = native_state(renderer);
+        NSSize size = [native->view convertSizeToBacking:native->view.bounds.size];
+        if (!isfinite(size.width) || !isfinite(size.height) || size.width < 1.0 ||
+            size.height < 1.0 || size.width > INT_MAX || size.height > INT_MAX)
+            return fail(error, error_capacity,
+                        "indexed drawable dimensions are invalid");
+        NSUInteger width = (NSUInteger)llround(size.width);
+        NSUInteger height = (NSUInteger)llround(size.height);
+        for (size_t slot = 0; slot < CC_IN_FLIGHT_FRAMES; ++slot) {
+            if (!prepare_depth(renderer, slot, width, height, true, error,
+                               error_capacity))
+                return false;
+        }
+        return true;
     }
 }

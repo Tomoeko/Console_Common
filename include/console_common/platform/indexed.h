@@ -2,6 +2,7 @@
 #define CONSOLE_COMMON_PLATFORM_INDEXED_H
 
 #include "console_common/platform/platform.h"
+#include "console_common/render/viewport.h"
 
 #include <stddef.h>
 
@@ -16,6 +17,7 @@ typedef struct CcIndexedRenderer CcIndexedRenderer;
 typedef struct CcIndexedProgram CcIndexedProgram;
 typedef struct CcIndexedMesh CcIndexedMesh;
 typedef struct CcIndexedTexture CcIndexedTexture;
+typedef struct CcIndexedTarget CcIndexedTarget;
 
 typedef enum CcIndexedCompare {
     CC_INDEXED_NEVER,
@@ -149,6 +151,48 @@ typedef struct CcIndexedFrame {
     bool depth_attachment;
 } CcIndexedFrame;
 
+typedef enum CcIndexedColorFormat {
+    CC_INDEXED_RGBA8,
+    CC_INDEXED_RGBA16_FLOAT
+} CcIndexedColorFormat;
+
+typedef struct CcIndexedTargetDescription {
+    unsigned width;
+    unsigned height;
+    CcIndexedColorFormat color_format;
+    bool depth_attachment;
+    CcIndexedFilter min_filter;
+    CcIndexedFilter mag_filter;
+} CcIndexedTargetDescription;
+
+typedef enum CcIndexedLoad {
+    CC_INDEXED_LOAD,
+    CC_INDEXED_CLEAR,
+    CC_INDEXED_DISCARD
+} CcIndexedLoad;
+
+typedef struct CcIndexedPass {
+    /* NULL selects the frame's drawable, otherwise a renderer-owned target. */
+    CcIndexedTarget *target;
+    CcViewport viewport;
+    CcIndexedLoad color_load;
+    CcIndexedLoad depth_load;
+    CcColor clear_color;
+    float clear_depth;
+    bool depth_attachment;
+    /* With DISCARD, the caller guarantees complete attachment coverage before
+     * another pass loads or samples it. The backend does not infer coverage. */
+    bool color_full_write;
+    bool depth_full_write;
+    /* False retains a bounded viewport and uses that same rectangle as scissor.
+     * True supplies independent top-left rectangles: viewport origins may be
+     * negative and either rectangle may extend beyond the attachment. Scissor
+     * origins and sizes are nonnegative. Backend attachment clipping leaves
+     * these requested values unchanged; an empty intersection draws nothing. */
+    bool scissor_enabled;
+    CcViewport scissor;
+} CcIndexedPass;
+
 typedef struct CcIndexedDraw {
     CcIndexedProgram *program;
     CcIndexedMesh *mesh;
@@ -193,6 +237,28 @@ CcIndexedRenderer *cc_indexed_create(CcPlatform *platform, char *error,
 void cc_indexed_destroy(CcIndexedRenderer *renderer);
 bool cc_indexed_reserve(CcIndexedRenderer *renderer, size_t draw_count, char *error,
                         size_t error_capacity);
+/* Pass storage and targets are prepared outside frames. Targets own one color
+ * texture and optional depth storage at fixed dimensions. Sampling is clamp,
+ * without mip levels, using the explicitly requested min/mag filters. Metal
+ * supports RGBA8 and RGBA16Float; core GLES2 supports RGBA8 and rejects float
+ * targets explicitly. It never substitutes an eight-bit target for HDR.
+ * Borrowed target textures cannot be individually released and expire when
+ * their target is released. Supplied backend shaders own texture-coordinate
+ * and clip-space conventions, as for ordinary indexed textures. */
+bool cc_indexed_reserve_passes(CcIndexedRenderer *renderer, size_t pass_count,
+                               char *error, size_t error_capacity);
+CcIndexedTarget *cc_indexed_target_create(CcIndexedRenderer *renderer,
+                                          const CcIndexedTargetDescription *description,
+                                          char *error, size_t error_capacity);
+CcIndexedTexture *cc_indexed_target_texture(CcIndexedRenderer *renderer,
+                                            CcIndexedTarget *target);
+bool cc_indexed_target_release(CcIndexedRenderer *renderer, CcIndexedTarget **target,
+                               char *error, size_t error_capacity);
+/* Prepare drawable depth outside frames, including after a drawable resize.
+ * Metal reuses matching attachments; GLES2 verifies actual host depth storage.
+ * The empty-frame entry never allocates a missing drawable depth attachment. */
+bool cc_indexed_prepare_drawable_depth(CcIndexedRenderer *renderer, char *error,
+                                       size_t error_capacity);
 CcIndexedProgram *
 cc_indexed_program_create(CcIndexedRenderer *renderer,
                           const CcIndexedProgramDescription *description, char *error,
@@ -231,6 +297,24 @@ bool cc_indexed_texture_release(CcIndexedRenderer *renderer, CcIndexedTexture **
                                 char *error, size_t error_capacity);
 bool cc_indexed_begin(CcIndexedRenderer *renderer, const CcIndexedFrame *frame,
                       char *error, size_t error_capacity);
+/* Starts an empty ordered frame; the frame specifies drawable depth availability.
+ * Its clear values are used only by the legacy begin wrapper. Each pass explicitly
+ * selects its load/clear policy and top-left viewport/scissor. Clears cover the
+ * entire attachment. A following pass completes/stores the previous pass. Fresh
+ * target LOAD/sample and current-target feedback fail before submission. End
+ * requires a drawable pass. Ordinary end performs no diagnostic wait/readback;
+ * opt-in platform capture retains its existing synchronization contract.
+ * GLES2 checks GL_MAX_VIEWPORT_DIMS and exact signed bottom-origin conversion
+ * before entering a pass, then submits the requested scissor unchanged. Metal
+ * sends the requested viewport and intersects scissor with the attachment for
+ * its unsigned scissor API; an empty intersection skips draw encoding. Neither
+ * backend changes the stored scene request or adds a clear for partial drawing. */
+/* Metal's empty-frame entry rejects a still-busy in-flight storage slot instead
+ * of waiting. The legacy begin wrapper keeps its existing slot-reuse wait. */
+bool cc_indexed_begin_passes(CcIndexedRenderer *renderer, const CcIndexedFrame *frame,
+                             char *error, size_t error_capacity);
+bool cc_indexed_pass_begin(CcIndexedRenderer *renderer, const CcIndexedPass *pass,
+                           char *error, size_t error_capacity);
 bool cc_indexed_draw(CcIndexedRenderer *renderer, const CcIndexedDraw *draw,
                      char *error, size_t error_capacity);
 bool cc_indexed_end(CcIndexedRenderer *renderer, char *error, size_t error_capacity);

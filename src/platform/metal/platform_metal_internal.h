@@ -188,5 +188,11 @@ bool cc_prepare_metal(CcMetalState *state);
 CcMetalState *cc_metal_platform_state(CcPlatform *platform);
 void cc_wait_for_metal(CcMetalState *state);
 void cc_release_metal(CcMetalState *state);
+/* Diagnostic readback shares the platform's opt-in capture storage. Indexed
+ * frames copy their actual drawable; ordinary quad frames copy their target.
+ * A changed drawable size leaves capture unavailable until capture restarts. */
+bool cc_metal_encode_capture(CcMetalState *state, id<MTLCommandBuffer> commands,
+                             id<MTLTexture> texture);
+void cc_metal_complete_capture(CcMetalState *state, id<MTLCommandBuffer> commands);
 
 #endif

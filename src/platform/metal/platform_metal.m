@@ -660,11 +660,17 @@ static void cc_encode_batches(CcMetalState *state, id<MTLRenderCommandEncoder> e
     }
 }
 
-static bool cc_encode_readback(CcMetalState *state, id<MTLCommandBuffer> commands) {
+bool cc_metal_encode_capture(CcMetalState *state, id<MTLCommandBuffer> commands,
+                             id<MTLTexture> texture) {
+    if (!state || !state->capture_texture || !commands || !texture ||
+        texture.width != (NSUInteger)state->capture_width ||
+        texture.height != (NSUInteger)state->capture_height ||
+        texture.pixelFormat != MTLPixelFormatBGRA8Unorm || texture.framebufferOnly)
+        return false;
     id<MTLBlitCommandEncoder> blit = [commands blitCommandEncoder];
     if (!blit)
         return false;
-    [blit copyFromTexture:state->capture_texture
+    [blit copyFromTexture:texture
                      sourceSlice:0
                      sourceLevel:0
                     sourceOrigin:MTLOriginMake(0, 0, 0)
@@ -676,6 +682,15 @@ static bool cc_encode_readback(CcMetalState *state, id<MTLCommandBuffer> command
         destinationBytesPerImage:state->capture_readback.length];
     [blit endEncoding];
     return true;
+}
+
+void cc_metal_complete_capture(CcMetalState *state, id<MTLCommandBuffer> commands) {
+    [commands waitUntilCompleted];
+    state->capture_ready =
+        commands.status == MTLCommandBufferStatusCompleted &&
+        cc_framebuffer_rgba(state->capture_rgba, state->capture_byte_count,
+                            state->capture_readback.contents, state->capture_width,
+                            state->capture_height, state->capture_stride, true, false);
 }
 
 static bool cc_encode_capture_presentation(CcMetalState *state,
@@ -854,7 +869,9 @@ void cc_platform_end(CcPlatform *platform) {
         cc_encode_batches(state, encoder, content, slot);
         [encoder endEncoding];
         state->rendering_multisample = false;
-        bool readback_encoded = capturing && cc_encode_readback(state, commands);
+        bool readback_encoded =
+            capturing &&
+            cc_metal_encode_capture(state, commands, state->capture_texture);
         if (capturing && drawable &&
             !cc_encode_capture_presentation(state, commands, drawable.texture, slot))
             drawable = nil;
@@ -864,15 +881,8 @@ void cc_platform_end(CcPlatform *platform) {
         cc_release_retired_textures(state);
         state->in_flight[slot] = commands;
         state->frame_number++;
-        if (readback_encoded) {
-            [commands waitUntilCompleted];
-            state->capture_ready =
-                commands.status == MTLCommandBufferStatusCompleted &&
-                cc_framebuffer_rgba(state->capture_rgba, state->capture_byte_count,
-                                    state->capture_readback.contents,
-                                    state->capture_width, state->capture_height,
-                                    state->capture_stride, true, false);
-        }
+        if (readback_encoded)
+            cc_metal_complete_capture(state, commands);
     }
 }
 
@@ -919,6 +929,8 @@ bool cc_platform_capture_begin(CcPlatform *platform, CcFramebuffer *frame) {
     state->capture_width = width;
     state->capture_height = height;
     state->capture_ready = false;
+    /* Indexed capture blits the drawable instead of the quad capture target. */
+    state->layer.framebufferOnly = NO;
     *frame = (CcFramebuffer){NULL, width, height, row};
     return true;
 }
@@ -949,6 +961,7 @@ void cc_platform_capture_end(CcPlatform *platform) {
     state->capture_width = 0;
     state->capture_height = 0;
     state->capture_ready = false;
+    state->layer.framebufferOnly = YES;
 }
 
 void cc_platform_set_fade_alpha(CcPlatform *platform, float alpha) {

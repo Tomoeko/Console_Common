@@ -143,6 +143,55 @@ static void release_order_test(CcIndexedRenderer *renderer) {
     REQUIRE(!cc_indexed_texture_release(renderer, NULL, NULL, 0));
 }
 
+static void capture_pixel_test(const CcFramebuffer *frame, int x, int y) {
+    const uint8_t expected[] = {51, 102, 153, 255};
+    const uint8_t *pixel = frame->rgba + (size_t)y * frame->stride + (size_t)x * 4;
+    for (size_t lane = 0; lane < 4; ++lane) {
+        int difference = (int)pixel[lane] - expected[lane];
+        REQUIRE(difference >= -1 && difference <= 1);
+    }
+}
+
+static void capture_test(CcPlatform *platform, CcIndexedRenderer *renderer) {
+    CcFramebuffer frame;
+    REQUIRE(!cc_platform_capture_frame(platform, &frame));
+    REQUIRE(cc_platform_capture_begin(platform, &frame));
+    REQUIRE(!frame.rgba && frame.width > 0 && frame.height > 0);
+    REQUIRE(!cc_platform_capture_frame(platform, &frame));
+    CcIndexedFrame indexed = {.clear_color = {0.2f, 0.4f, 0.6f, 1.0f},
+                              .clear_color_enabled = true};
+    REQUIRE(cc_indexed_begin(renderer, &indexed, NULL, 0));
+    REQUIRE(cc_indexed_end(renderer, NULL, 0));
+    REQUIRE(cc_platform_capture_frame(platform, &frame));
+    REQUIRE(frame.rgba && frame.stride >= (size_t)frame.width * 4);
+    for (int y = 0; y < frame.height; ++y)
+        for (int x = 0; x < frame.width; ++x)
+            capture_pixel_test(&frame, x, y);
+    cc_platform_capture_end(platform);
+    REQUIRE(!cc_platform_capture_frame(platform, &frame));
+
+    REQUIRE(cc_indexed_begin(renderer, &indexed, NULL, 0));
+    REQUIRE(cc_platform_capture_begin(platform, &frame));
+    REQUIRE(cc_indexed_end(renderer, NULL, 0));
+    REQUIRE(!cc_platform_capture_frame(platform, &frame));
+    REQUIRE(cc_indexed_begin(renderer, &indexed, NULL, 0));
+    REQUIRE(cc_indexed_end(renderer, NULL, 0));
+    REQUIRE(cc_platform_capture_frame(platform, &frame));
+    capture_pixel_test(&frame, frame.width / 2, frame.height / 2);
+    cc_platform_capture_end(platform);
+
+    /* The original quad route still captures its target, including its fader.
+     * Inspect the fitted picture center so non-16:9 consumer bars stay valid. */
+    REQUIRE(cc_platform_capture_begin(platform, &frame));
+    cc_platform_set_fade_alpha(platform, 0.0f);
+    cc_platform_begin(platform, indexed.clear_color);
+    cc_platform_end(platform);
+    REQUIRE(cc_platform_capture_frame(platform, &frame));
+    capture_pixel_test(&frame, frame.width / 2, frame.height / 2);
+    cc_platform_capture_end(platform);
+    REQUIRE(!cc_platform_capture_frame(platform, &frame));
+}
+
 int main(void) {
     CcPlatform *platform = cc_platform_create("Indexed Metal validation", 160, 90);
     if (!platform)
@@ -229,6 +278,7 @@ int main(void) {
     if (!completed)
         fprintf(stderr, "%s\n", error);
     REQUIRE(completed);
+    capture_test(platform, renderer);
     cc_indexed_destroy(renderer);
     cc_platform_destroy(platform);
     puts("Indexed Metal GPU submission tests passed.");

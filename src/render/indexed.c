@@ -162,3 +162,63 @@ bool cc_indexed_uniforms_validate(const float (*rows)[4], size_t count, size_t e
     }
     return true;
 }
+
+bool cc_indexed_target_validate(const CcIndexedTargetDescription *description,
+                                char *error, size_t error_capacity) {
+    if (!description || !description->width || !description->height ||
+        description->width > INT_MAX || description->height > INT_MAX ||
+        (unsigned)description->color_format > CC_INDEXED_RGBA16_FLOAT ||
+        (unsigned)description->min_filter > CC_INDEXED_LINEAR ||
+        (unsigned)description->mag_filter > CC_INDEXED_LINEAR)
+        return fail(error, error_capacity, "invalid indexed target description");
+    size_t texel_bytes = description->color_format == CC_INDEXED_RGBA8 ? 4 : 8;
+    if ((size_t)description->width > SIZE_MAX / texel_bytes ||
+        (size_t)description->height >
+            SIZE_MAX / ((size_t)description->width * texel_bytes))
+        return fail(error, error_capacity, "indexed target size overflows storage");
+    return true;
+}
+
+static bool pass_rectangle_valid(CcViewport rectangle, unsigned height, bool scissor) {
+    if (rectangle.width < (scissor ? 0 : 1) || rectangle.height < (scissor ? 0 : 1) ||
+        (scissor && (rectangle.x < 0 || rectangle.y < 0)))
+        return false;
+    /* The GLES2 bottom-origin request must remain exactly representable. */
+    int64_t bottom = (int64_t)height - rectangle.y - rectangle.height;
+    return bottom >= INT_MIN && bottom <= INT_MAX;
+}
+
+static bool pass_rectangles_valid(const CcIndexedPass *pass, unsigned width,
+                                  unsigned height) {
+    CcViewport viewport = pass->viewport;
+    if (!pass_rectangle_valid(viewport, height, false))
+        return false;
+    if (pass->scissor_enabled)
+        return pass_rectangle_valid(pass->scissor, height, true);
+    return viewport.x >= 0 && viewport.y >= 0 && (unsigned)viewport.x <= width &&
+           (unsigned)viewport.y <= height &&
+           (unsigned)viewport.width <= width - (unsigned)viewport.x &&
+           (unsigned)viewport.height <= height - (unsigned)viewport.y;
+}
+
+bool cc_indexed_pass_validate(const CcIndexedPass *pass, unsigned width,
+                              unsigned height, bool depth_available, bool color_valid,
+                              bool depth_valid, char *error, size_t error_capacity) {
+    if (!pass || !width || !height || width > INT_MAX || height > INT_MAX ||
+        !pass_rectangles_valid(pass, width, height) ||
+        (unsigned)pass->color_load > CC_INDEXED_DISCARD ||
+        (unsigned)pass->depth_load > CC_INDEXED_DISCARD ||
+        (pass->depth_attachment && !depth_available) ||
+        (!pass->depth_attachment &&
+         (pass->depth_load == CC_INDEXED_CLEAR || pass->depth_full_write)) ||
+        (pass->target && pass->color_load == CC_INDEXED_LOAD && !color_valid) ||
+        (pass->target && pass->depth_attachment &&
+         pass->depth_load == CC_INDEXED_LOAD && !depth_valid))
+        return fail(error, error_capacity,
+                    "invalid indexed pass attachment or viewport");
+    CcIndexedFrame clear = {.clear_color = pass->clear_color,
+                            .clear_depth = pass->clear_depth,
+                            .clear_depth_enabled = pass->depth_load == CC_INDEXED_CLEAR,
+                            .depth_attachment = pass->depth_attachment};
+    return cc_indexed_frame_validate(&clear, error, error_capacity);
+}
