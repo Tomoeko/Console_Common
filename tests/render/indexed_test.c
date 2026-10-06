@@ -178,6 +178,11 @@ static void target_pass_test(void) {
     target.color_format = CC_INDEXED_RGBA8;
     target.mag_filter = (CcIndexedFilter)2;
     REQUIRE(!cc_indexed_target_validate(&target, NULL, 0));
+    target.mag_filter = CC_INDEXED_NEAREST;
+    target.depth_source = (CcIndexedTarget *)(uintptr_t)1;
+    REQUIRE(cc_indexed_target_validate(&target, NULL, 0));
+    target.depth_attachment = false;
+    REQUIRE(!cc_indexed_target_validate(&target, NULL, 0));
     CcIndexedPass pass = {.target = (CcIndexedTarget *)(uintptr_t)1,
                           .viewport = {0, 0, 32, 16},
                           .color_load = CC_INDEXED_LOAD,

@@ -1,6 +1,6 @@
 #include <OpenGL/OpenGL.h>
 #include "apple_gl_compat/indexed_host.h"
-#include "../support/indexed_pass_fixture.h"
+#include "../support/indexed_shared_depth_fixture.h"
 #include "host.h"
 
 #undef glBindFramebuffer
@@ -97,6 +97,36 @@ static void viewport_capability(CcIndexedRenderer *renderer) {
     PASS_REQUIRE(cc_indexed_end(renderer, NULL, 0));
 }
 
+static void shared_depth_creation_failure(CcIndexedRenderer *renderer) {
+    CcIndexedTarget *owner = pass_target(renderer, CC_INDEXED_RGBA8, true);
+    CcIndexedFrame frame = {0};
+    PASS_REQUIRE(cc_indexed_begin_passes(renderer, &frame, NULL, 0));
+    CcIndexedPass pass = pass_description(owner, CC_INDEXED_CLEAR);
+    pass.depth_attachment = true;
+    pass.depth_load = CC_INDEXED_CLEAR;
+    PASS_REQUIRE(cc_indexed_pass_begin(renderer, &pass, NULL, 0));
+    pass = pass_description(NULL, CC_INDEXED_CLEAR);
+    PASS_REQUIRE(cc_indexed_pass_begin(renderer, &pass, NULL, 0));
+    PASS_REQUIRE(cc_indexed_end(renderer, NULL, 0));
+    CcIndexedTargetDescription description = {
+        .width = 32, .height = 16, .depth_attachment = true, .depth_source = owner};
+    /* Fail after FBO allocation and depth attachment. Cleanup must leave the
+     * original renderbuffer alive and its existing contents initialized. */
+    glEnable((GLenum)UINT32_MAX);
+    PASS_REQUIRE(!cc_indexed_target_create(renderer, &description, NULL, 0));
+    CcIndexedTarget *borrower = shared_depth_target(renderer, owner);
+    PASS_REQUIRE(cc_indexed_begin_passes(renderer, &frame, NULL, 0));
+    pass = pass_description(borrower, CC_INDEXED_CLEAR);
+    pass.depth_attachment = true;
+    pass.depth_load = CC_INDEXED_LOAD;
+    PASS_REQUIRE(cc_indexed_pass_begin(renderer, &pass, NULL, 0));
+    pass = pass_description(NULL, CC_INDEXED_CLEAR);
+    PASS_REQUIRE(cc_indexed_pass_begin(renderer, &pass, NULL, 0));
+    PASS_REQUIRE(cc_indexed_end(renderer, NULL, 0));
+    PASS_REQUIRE(cc_indexed_target_release(renderer, &borrower, NULL, 0));
+    PASS_REQUIRE(cc_indexed_target_release(renderer, &owner, NULL, 0));
+}
+
 static void capture_pixels(uint8_t *pixels, uint8_t *top_rows) {
     glReadPixels(0, 0, 128, 96, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
     for (size_t y = 0; y < 96; ++y) {
@@ -134,14 +164,20 @@ int main(void) {
     CcIndexedRenderer *other = cc_indexed_create(&platform, NULL, 0);
     PASS_REQUIRE(other);
     pass_admission(renderer, other);
+    shared_depth_admission(renderer, other);
     cc_indexed_destroy(other);
     entered_pass_failure(renderer);
     viewport_capability(renderer);
+    shared_depth_creation_failure(renderer);
     CcIndexedTargetDescription unsupported = {
         .width = 8, .height = 8, .color_format = CC_INDEXED_RGBA16_FLOAT};
     PASS_REQUIRE(!cc_indexed_target_create(renderer, &unsupported, NULL, 0));
     uint8_t pixels[128 * 96 * 4];
     uint8_t top_rows[sizeof(pixels)];
+    shared_depth_scene(renderer, 128, 96);
+    capture_pixels(pixels, top_rows);
+    CcFramebuffer shared_frame = {top_rows, 128, 96, 128 * 4};
+    shared_depth_pixels(&shared_frame);
     for (size_t iteration = 0; iteration < 4; ++iteration) {
         pass_scene(renderer, 128, 96, false);
         capture_pixels(pixels, top_rows);

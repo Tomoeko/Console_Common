@@ -59,6 +59,8 @@ struct CcIndexedTarget {
     CcIndexedTarget *next;
     CcIndexedTexture texture;
     CcIndexedTargetDescription description;
+    CcIndexedTarget *depth_owner;
+    size_t depth_borrowers;
     GLuint framebuffer;
     GLuint depth;
     bool color_valid;
@@ -164,7 +166,8 @@ void cc_indexed_destroy(CcIndexedRenderer *renderer) {
         renderer->targets = target->next;
         if (current) {
             glDeleteFramebuffers(1, &target->framebuffer);
-            glDeleteRenderbuffers(1, &target->depth);
+            if (target->depth_owner == target)
+                glDeleteRenderbuffers(1, &target->depth);
             glDeleteTextures(1, &target->texture.texture);
         }
         free(target);
@@ -686,9 +689,9 @@ static bool draw_validate(CcIndexedRenderer *renderer, const CcIndexedDraw *draw
                 return fail(error, error_capacity,
                             "indexed target feedback is unsupported");
             bool color_valid = texture->target->color_valid;
-            bool depth_valid = texture->target->depth_valid;
+            bool depth_valid = false;
             cc_indexed_pass_content(renderer->passes, renderer->pass_count - 1,
-                                    texture->target, &color_valid, &depth_valid);
+                                    texture->target, NULL, &color_valid, &depth_valid);
             if (!color_valid)
                 return fail(error, error_capacity,
                             "indexed target color is uninitialized");
@@ -748,7 +751,8 @@ bool cc_indexed_end(CcIndexedRenderer *renderer, char *error, size_t error_capac
             CcIndexedTarget *target = renderer->passes[index].description.target;
             if (target) {
                 target->color_valid = false;
-                target->depth_valid = false;
+                if (renderer->passes[index].description.depth_attachment)
+                    target->depth_owner->depth_valid = false;
             }
         }
         cc_gles2_platform_invalidate_graphics(renderer->platform);
@@ -758,7 +762,8 @@ bool cc_indexed_end(CcIndexedRenderer *renderer, char *error, size_t error_capac
         CcIndexedPassRecord *pass = &renderer->passes[index];
         if (pass->description.target) {
             pass->description.target->color_valid = valid && pass->color_valid;
-            pass->description.target->depth_valid = valid && pass->depth_valid;
+            if (pass->description.depth_attachment)
+                pass->depth_owner->depth_valid = valid && pass->depth_valid;
         }
     }
     bool presented = valid && cc_gles2_host_present(renderer->host);
@@ -808,7 +813,8 @@ bool cc_indexed_reserve_passes(CcIndexedRenderer *renderer, size_t pass_count,
 
 static void delete_target(CcIndexedTarget *target) {
     glDeleteFramebuffers(1, &target->framebuffer);
-    glDeleteRenderbuffers(1, &target->depth);
+    if (target->depth_owner == target)
+        glDeleteRenderbuffers(1, &target->depth);
     glDeleteTextures(1, &target->texture.texture);
     free(target);
 }
@@ -823,6 +829,20 @@ CcIndexedTarget *cc_indexed_target_create(CcIndexedRenderer *renderer,
         fail(error, error_capacity,
              "indexed half-float targets are unsupported by core GLES2");
         return NULL;
+    }
+    CcIndexedTarget *depth_owner = NULL;
+    if (description->depth_source) {
+        for (CcIndexedTarget *member = renderer->targets; member;
+             member = member->next) {
+            if (member == description->depth_source)
+                depth_owner = member->depth_owner;
+        }
+        if (!depth_owner || depth_owner->description.width != description->width ||
+            depth_owner->description.height != description->height ||
+            depth_owner->depth_borrowers == SIZE_MAX) {
+            fail(error, error_capacity, "invalid indexed shared depth source");
+            return NULL;
+        }
     }
     GLint maximum = 0;
     glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maximum);
@@ -841,6 +861,9 @@ CcIndexedTarget *cc_indexed_target_create(CcIndexedRenderer *renderer,
         fail(error, error_capacity, "cannot allocate indexed target handle");
         return NULL;
     }
+    target->depth_owner = depth_owner                     ? depth_owner
+                          : description->depth_attachment ? target
+                                                          : NULL;
     glGenTextures(1, &target->texture.texture);
     glBindTexture(GL_TEXTURE_2D, target->texture.texture);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
@@ -858,11 +881,15 @@ CcIndexedTarget *cc_indexed_target_create(CcIndexedRenderer *renderer,
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
                            target->texture.texture, 0);
     if (description->depth_attachment) {
-        glGenRenderbuffers(1, &target->depth);
-        glBindRenderbuffer(GL_RENDERBUFFER, target->depth);
-        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT16,
-                              (GLsizei)description->width,
-                              (GLsizei)description->height);
+        if (depth_owner) {
+            target->depth = depth_owner->depth;
+        } else {
+            glGenRenderbuffers(1, &target->depth);
+            glBindRenderbuffer(GL_RENDERBUFFER, target->depth);
+            glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT16,
+                                  (GLsizei)description->width,
+                                  (GLsizei)description->height);
+        }
         glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER,
                                   target->depth);
     }
@@ -878,6 +905,9 @@ CcIndexedTarget *cc_indexed_target_create(CcIndexedRenderer *renderer,
     }
     target->owner = renderer;
     target->description = *description;
+    target->description.depth_source = depth_owner;
+    if (depth_owner)
+        ++depth_owner->depth_borrowers;
     target->texture.owner = renderer;
     target->texture.target = target;
     target->next = renderer->targets;
@@ -909,7 +939,11 @@ bool cc_indexed_target_release(CcIndexedRenderer *renderer, CcIndexedTarget **ta
         return fail(error, error_capacity,
                     "indexed target belongs to another renderer");
     CcIndexedTarget *released = *slot;
+    if (released->depth_borrowers)
+        return fail(error, error_capacity, "indexed depth storage is still shared");
     *slot = released->next;
+    if (released->depth_owner && released->depth_owner != released)
+        --released->depth_owner->depth_borrowers;
     delete_target(released);
     *target = NULL;
     return true;
@@ -935,10 +969,11 @@ bool cc_indexed_pass_begin(CcIndexedRenderer *renderer, const CcIndexedPass *pas
     unsigned width = target ? target->description.width : (unsigned)renderer->width;
     unsigned height = target ? target->description.height : (unsigned)renderer->height;
     bool color_valid = target ? target->color_valid : true;
-    bool depth_valid = target ? target->depth_valid : true;
+    CcIndexedTarget *depth_owner = target ? target->depth_owner : NULL;
+    bool depth_valid = target ? depth_owner && depth_owner->depth_valid : true;
     if (target)
         cc_indexed_pass_content(renderer->passes, renderer->pass_count, target,
-                                &color_valid, &depth_valid);
+                                depth_owner, &color_valid, &depth_valid);
     bool depth_available = target ? target->description.depth_attachment
                                   : renderer->frame.depth_attachment;
     if (!cc_indexed_pass_validate(pass, width, height, depth_available, color_valid,
@@ -976,12 +1011,13 @@ bool cc_indexed_pass_begin(CcIndexedRenderer *renderer, const CcIndexedPass *pas
         renderer->failed = true;
         if (target) {
             target->color_valid = false;
-            target->depth_valid = false;
+            if (pass->depth_attachment)
+                depth_owner->depth_valid = false;
         }
         return fail(error, error_capacity, "cannot begin indexed GLES2 pass");
     }
-    renderer->passes[renderer->pass_count++] =
-        cc_indexed_pass_record(pass, renderer->draw_count, color_valid, depth_valid);
+    renderer->passes[renderer->pass_count++] = cc_indexed_pass_record(
+        pass, renderer->draw_count, depth_owner, color_valid, depth_valid);
     renderer->drawable_pass |= target == NULL;
     return true;
 }

@@ -217,7 +217,8 @@ bool cc_indexed_target_validate(const CcIndexedTargetDescription *description,
         description->width > INT_MAX || description->height > INT_MAX ||
         (unsigned)description->color_format > CC_INDEXED_RGBA16_FLOAT ||
         (unsigned)description->min_filter > CC_INDEXED_LINEAR ||
-        (unsigned)description->mag_filter > CC_INDEXED_LINEAR)
+        (unsigned)description->mag_filter > CC_INDEXED_LINEAR ||
+        (description->depth_source && !description->depth_attachment))
         return fail(error, error_capacity, "invalid indexed target description");
     size_t texel_bytes = description->color_format == CC_INDEXED_RGBA8 ? 4 : 8;
     if ((size_t)description->width > SIZE_MAX / texel_bytes ||

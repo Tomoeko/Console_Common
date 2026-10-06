@@ -9,6 +9,7 @@ typedef struct CcIndexedPassRecord {
     size_t draw_count;
     bool color_valid;
     bool depth_valid;
+    CcIndexedTarget *depth_owner;
 } CcIndexedPassRecord;
 
 static inline CcViewport cc_indexed_pass_scissor(const CcIndexedPass *pass) {
@@ -38,17 +39,20 @@ static inline CcViewport cc_indexed_pass_scissor_clip(const CcIndexedPass *pass,
 /* Records are transient ordered commands, not another texture payload. */
 static inline void cc_indexed_pass_content(const CcIndexedPassRecord *passes,
                                            size_t count, CcIndexedTarget *target,
+                                           CcIndexedTarget *depth_owner,
                                            bool *color_valid, bool *depth_valid) {
     for (size_t index = 0; index < count; ++index) {
-        if (passes[index].description.target == target) {
+        if (passes[index].description.target == target)
             *color_valid = passes[index].color_valid;
+        if (depth_owner && passes[index].depth_owner == depth_owner &&
+            passes[index].description.depth_attachment)
             *depth_valid = passes[index].depth_valid;
-        }
     }
 }
 
 static inline CcIndexedPassRecord cc_indexed_pass_record(const CcIndexedPass *pass,
                                                          size_t first_draw,
+                                                         CcIndexedTarget *depth_owner,
                                                          bool color_valid,
                                                          bool depth_valid) {
     if (pass->color_load != CC_INDEXED_LOAD)
@@ -58,7 +62,8 @@ static inline CcIndexedPassRecord cc_indexed_pass_record(const CcIndexedPass *pa
     return (CcIndexedPassRecord){.description = *pass,
                                  .first_draw = first_draw,
                                  .color_valid = color_valid,
-                                 .depth_valid = depth_valid};
+                                 .depth_valid = depth_valid,
+                                 .depth_owner = depth_owner};
 }
 
 #endif

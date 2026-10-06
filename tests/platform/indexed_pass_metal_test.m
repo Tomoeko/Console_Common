@@ -1,4 +1,4 @@
-#include "../support/indexed_pass_fixture.h"
+#include "../support/indexed_shared_depth_fixture.h"
 
 int main(void) {
     CcPlatform *platform = cc_platform_create("Indexed offscreen validation", 160, 90);
@@ -9,10 +9,17 @@ int main(void) {
     CcIndexedRenderer *other = cc_indexed_create(platform, NULL, 0);
     PASS_REQUIRE(other);
     pass_admission(renderer, other);
+    shared_depth_admission(renderer, other);
     cc_indexed_destroy(other);
     CcIndexedFrame unprepared = {.depth_attachment = true};
     PASS_REQUIRE(!cc_indexed_begin_passes(renderer, &unprepared, NULL, 0));
     PASS_REQUIRE(cc_indexed_prepare_drawable_depth(renderer, NULL, 0));
+    CcFramebuffer shared_frame;
+    PASS_REQUIRE(cc_platform_capture_begin(platform, &shared_frame));
+    shared_depth_scene(renderer, shared_frame.width, shared_frame.height);
+    PASS_REQUIRE(cc_platform_capture_frame(platform, &shared_frame));
+    shared_depth_pixels(&shared_frame);
+    cc_platform_capture_end(platform);
     for (size_t iteration = 0; iteration < 4; ++iteration) {
         CcFramebuffer frame;
         PASS_REQUIRE(cc_platform_capture_begin(platform, &frame));

@@ -163,6 +163,10 @@ typedef struct CcIndexedTargetDescription {
     bool depth_attachment;
     CcIndexedFilter min_filter;
     CcIndexedFilter mag_filter;
+    /* Borrowed during creation. Share this same-renderer target's depth storage;
+     * dimensions must match. NULL allocates independent storage. The depth owner
+     * cannot be released until every sharing target has been released. */
+    CcIndexedTarget *depth_source;
 } CcIndexedTargetDescription;
 
 typedef enum CcIndexedLoad {

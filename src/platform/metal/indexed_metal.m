@@ -97,6 +97,8 @@ struct CcIndexedTarget {
     CcIndexedTarget *next;
     CcIndexedTexture texture;
     CcIndexedTargetDescription description;
+    CcIndexedTarget *depth_owner;
+    size_t depth_borrowers;
     bool color_valid;
     bool depth_valid;
 };
@@ -747,9 +749,9 @@ static bool draw_validate(CcIndexedRenderer *renderer, const CcIndexedDraw *draw
                 return fail(error, error_capacity,
                             "indexed target feedback is unsupported");
             bool color_valid = texture->target->color_valid;
-            bool depth_valid = texture->target->depth_valid;
+            bool depth_valid = false;
             cc_indexed_pass_content(renderer->passes, renderer->pass_count - 1,
-                                    texture->target, &color_valid, &depth_valid);
+                                    texture->target, NULL, &color_valid, &depth_valid);
             if (!color_valid)
                 return fail(error, error_capacity,
                             "indexed target color is uninitialized");
@@ -923,7 +925,8 @@ static bool end_frame(CcIndexedRenderer *renderer, char *error, size_t error_cap
         CcIndexedPassRecord *pass = &renderer->passes[index];
         if (pass->description.target) {
             pass->description.target->color_valid = pass->color_valid;
-            pass->description.target->depth_valid = pass->depth_valid;
+            if (pass->description.depth_attachment)
+                pass->depth_owner->depth_valid = pass->depth_valid;
         }
     }
     frames.drawable = nil;
@@ -1201,6 +1204,20 @@ static CcIndexedTarget *create_target(CcIndexedRenderer *renderer,
         fail(error, error_capacity, "indexed target exceeds Metal 2D limit");
         return NULL;
     }
+    CcIndexedTarget *depth_owner = NULL;
+    if (description->depth_source) {
+        for (CcIndexedTarget *member = renderer->targets; member;
+             member = member->next) {
+            if (member == description->depth_source)
+                depth_owner = member->depth_owner;
+        }
+        if (!depth_owner || depth_owner->description.width != description->width ||
+            depth_owner->description.height != description->height ||
+            depth_owner->depth_borrowers == SIZE_MAX) {
+            fail(error, error_capacity, "invalid indexed shared depth source");
+            return NULL;
+        }
+    }
     CcMetalState *native = native_state(renderer);
     MTLPixelFormat format = description->color_format == CC_INDEXED_RGBA8
                                 ? MTLPixelFormatRGBA8Unorm
@@ -1214,7 +1231,11 @@ static CcIndexedTarget *create_target(CcIndexedRenderer *renderer,
     layout.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
     CcIndexedMetalTexture *objects = [CcIndexedMetalTexture new];
     objects.texture = [native->device newTextureWithDescriptor:layout];
-    if (description->depth_attachment) {
+    if (depth_owner) {
+        CcIndexedMetalTexture *source =
+            (__bridge CcIndexedMetalTexture *)depth_owner->texture.objects;
+        objects.depth = source.depth;
+    } else if (description->depth_attachment) {
         layout.pixelFormat = MTLPixelFormatDepth32Float;
         layout.usage = MTLTextureUsageRenderTarget;
         objects.depth = [native->device newTextureWithDescriptor:layout];
@@ -1242,6 +1263,12 @@ static CcIndexedTarget *create_target(CcIndexedRenderer *renderer,
     }
     target->owner = renderer;
     target->description = *description;
+    target->description.depth_source = depth_owner;
+    target->depth_owner = depth_owner                     ? depth_owner
+                          : description->depth_attachment ? target
+                                                          : NULL;
+    if (depth_owner)
+        ++depth_owner->depth_borrowers;
     target->texture.owner = renderer;
     target->texture.target = target;
     target->texture.objects = (__bridge_retained void *)objects;
@@ -1282,7 +1309,11 @@ bool cc_indexed_target_release(CcIndexedRenderer *renderer, CcIndexedTarget **ta
         return fail(error, error_capacity,
                     "indexed target belongs to another renderer");
     CcIndexedTarget *released = *slot;
+    if (released->depth_borrowers)
+        return fail(error, error_capacity, "indexed depth storage is still shared");
     *slot = released->next;
+    if (released->depth_owner && released->depth_owner != released)
+        --released->depth_owner->depth_borrowers;
     (void)CFBridgingRelease(released->texture.objects);
     free(released);
     *target = NULL;
@@ -1319,17 +1350,18 @@ bool cc_indexed_pass_begin(CcIndexedRenderer *renderer, const CcIndexedPass *pas
     unsigned height =
         target ? target->description.height : (unsigned)frames.drawable.texture.height;
     bool color_valid = target ? target->color_valid : true;
-    bool depth_valid = target ? target->depth_valid : true;
+    CcIndexedTarget *depth_owner = target ? target->depth_owner : NULL;
+    bool depth_valid = target ? depth_owner && depth_owner->depth_valid : true;
     if (target)
         cc_indexed_pass_content(renderer->passes, renderer->pass_count, target,
-                                &color_valid, &depth_valid);
+                                depth_owner, &color_valid, &depth_valid);
     bool depth_available = target ? target->description.depth_attachment
                                   : renderer->frame.depth_attachment;
     if (!cc_indexed_pass_validate(pass, width, height, depth_available, color_valid,
                                   depth_valid, error, error_capacity))
         return false;
-    renderer->passes[renderer->pass_count++] =
-        cc_indexed_pass_record(pass, renderer->draw_count, color_valid, depth_valid);
+    renderer->passes[renderer->pass_count++] = cc_indexed_pass_record(
+        pass, renderer->draw_count, depth_owner, color_valid, depth_valid);
     renderer->drawable_pass |= target == NULL;
     return true;
 }
