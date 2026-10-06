@@ -150,10 +150,6 @@ bool cc_indexed_texture_validate(const CcIndexedTextureDescription *description,
         width = width > 1 ? width / 2 : 1;
         height = height > 1 ? height / 2 : 1;
     }
-    const CcIndexedMip *last = &description->levels[description->level_count - 1];
-    if (description->mip_filter != CC_INDEXED_MIP_NONE &&
-        (last->width != 1 || last->height != 1))
-        return fail(error, error_capacity, "indexed mip filter needs complete chain");
     return true;
 }
 

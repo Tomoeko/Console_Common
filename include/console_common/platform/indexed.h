@@ -220,6 +220,8 @@ typedef struct CcIndexedDraw {
  * GLES vec4 values; Metal receives the same contiguous rows at the configured
  * stage buffer indices. Vertex buffer zero is reserved for mesh attributes.
  * Alpha tests and clip-space conventions belong to supplied shader sources.
+ * Metal preserves partial mip chains with their supplied level count. Core ES2
+ * requires mip-filtered chains to reach 1x1. No backend generates missing levels.
  * ES2 NPOT textures require clamp sampling without mip filtering; unsupported
  * combinations fail explicitly. LOD bounds are finite, nonnegative and ordered;
  * anisotropy is explicitly 1 through 16. Metal preserves all three requests.

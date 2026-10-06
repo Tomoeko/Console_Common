@@ -1,6 +1,7 @@
 #include <OpenGL/OpenGL.h>
 #include "apple_gl_compat/indexed_host.h"
 #include "../support/indexed_texture_fixture.h"
+#include "../support/indexed_partial_texture_fixture.h"
 #include "host.h"
 
 #undef glBindFramebuffer
@@ -88,6 +89,11 @@ int main(void) {
     CcPlatform platform = {&host};
     CcIndexedRenderer *renderer = cc_indexed_create(&platform, NULL, 0);
     CHECK(renderer);
+    uint8_t partial_pixels[PARTIAL_MIPS_BYTES];
+    CcIndexedTextureDescription partial = partial_texture_description(partial_pixels);
+    CHECK(!cc_indexed_texture_create(renderer, &partial, NULL, 0));
+    CHECK(!cc_indexed_texture_create_dynamic(renderer, &partial, NULL, 0));
+    CHECK(glGetError() == GL_NO_ERROR);
     TextureFixture fixture;
     texture_fixture_open(&fixture, renderer);
     CcIndexedRenderer *other = cc_indexed_create(&platform, NULL, 0);

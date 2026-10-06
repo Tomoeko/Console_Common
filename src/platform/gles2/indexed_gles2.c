@@ -459,6 +459,12 @@ static CcIndexedTexture *create_texture(CcIndexedRenderer *renderer,
              ? !cc_indexed_texture_layout(description, &layout, error, error_capacity)
              : !cc_indexed_texture_validate(description, error, error_capacity)))
         return NULL;
+    const CcIndexedMip *last = &description->levels[description->level_count - 1];
+    if (description->mip_filter != CC_INDEXED_MIP_NONE &&
+        (last->width != 1 || last->height != 1)) {
+        fail(error, error_capacity, "indexed mip filter needs complete core ES2 chain");
+        return NULL;
+    }
     float last_level = description->mip_filter == CC_INDEXED_MIP_NONE
                            ? 0.0f
                            : (float)(description->level_count - 1);

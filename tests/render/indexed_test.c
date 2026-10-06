@@ -107,7 +107,7 @@ static void texture_test(void) {
     description.wrap_s = CC_INDEXED_REPEAT;
     REQUIRE(cc_indexed_texture_validate(&description, NULL, 0));
     description.level_count = 2;
-    REQUIRE(!cc_indexed_texture_validate(&description, NULL, 0));
+    REQUIRE(cc_indexed_texture_validate(&description, NULL, 0));
     description.mip_filter = CC_INDEXED_MIP_NONE;
     REQUIRE(cc_indexed_texture_validate(&description, NULL, 0));
     description.levels[1].size = 15;
@@ -118,7 +118,7 @@ static void texture_test(void) {
     description.wrap_s = CC_INDEXED_CLAMP;
     REQUIRE(cc_indexed_texture_validate(&description, NULL, 0));
     description.mip_filter = CC_INDEXED_MIP_NEAREST;
-    REQUIRE(!cc_indexed_texture_validate(&description, NULL, 0));
+    REQUIRE(cc_indexed_texture_validate(&description, NULL, 0));
     description.level_count = 2;
     description.levels[1] = (CcIndexedMip){rgba, 4, 1, 1};
     REQUIRE(cc_indexed_texture_validate(&description, NULL, 0));

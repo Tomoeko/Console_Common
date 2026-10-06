@@ -226,6 +226,14 @@ if(APPLE)
     add_test(NAME cc-indexed-texture-metal COMMAND cc-indexed-texture-metal-test)
     set_tests_properties(cc-indexed-texture-metal PROPERTIES SKIP_RETURN_CODE 77)
 
+    add_executable(cc-indexed-texture-partial-metal-test
+        platform/indexed_texture_partial_metal_test.c)
+    cc_add_platform(cc-indexed-texture-partial-metal-test metal)
+    target_compile_options(cc-indexed-texture-partial-metal-test PRIVATE
+        -Wall -Wextra -Werror -Wpedantic -Wconversion)
+    add_test(NAME cc-indexed-texture-partial-metal
+        COMMAND cc-indexed-texture-partial-metal-test)
+
     add_executable(cc-indexed-texture-gles2-apple-test
         platform/indexed_texture_gles2_apple_test.c
         "${common_root}/src/platform/gles2/indexed_gles2.c")
