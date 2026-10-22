@@ -2,6 +2,7 @@
 
 #include "console_common/render/viewport.h"
 
+#include <limits.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -45,7 +46,9 @@ static void cc_enqueue_event(CcPlatform *platform, CcEvent event) {
 
 - (void)resetCursorRects {
     [super resetCursorRects];
-    if (self.hiddenCursor) {
+    if (self.platform && self.platform->cursor_visible) {
+        [self addCursorRect:self.bounds cursor:NSCursor.arrowCursor];
+    } else if (self.hiddenCursor) {
         [self addCursorRect:self.bounds cursor:self.hiddenCursor];
     }
 }
@@ -94,6 +97,12 @@ static void cc_enqueue_event(CcPlatform *platform, CcEvent event) {
                               bounds.size.height);
     bool outside =
         !cc_viewport_map_pointer_unbounded(content, output_x, output_y, &x, &y);
+    if (self.platform->native_pointer) {
+        x = output_x;
+        y = output_y;
+        outside = x < 0 || y < 0 || x >= (int)llround(backing.width) ||
+                  y >= (int)llround(backing.height);
+    }
     CcEvent event = {
         .type = type,
         .x = x,
@@ -104,7 +113,16 @@ static void cc_enqueue_event(CcPlatform *platform, CcEvent event) {
                   : native_event.buttonNumber == 2 ? CC_POINTER_MIDDLE
                                                    : CC_POINTER_LEFT,
     };
+    if (type == CC_EVENT_POINTER_SCROLL) {
+        event.scroll_x = (float)native_event.scrollingDeltaX;
+        event.scroll_y = (float)native_event.scrollingDeltaY;
+        event.scroll_precise = native_event.hasPreciseScrollingDeltas;
+    }
     cc_enqueue_event(self.platform, event);
+}
+
+- (void)scrollWheel:(NSEvent *)event {
+    [self recordPointer:event type:CC_EVENT_POINTER_SCROLL];
 }
 
 - (void)mouseDown:(NSEvent *)event {
@@ -402,6 +420,39 @@ void cc_platform_destroy(CcPlatform *platform) {
         free(platform->events);
         free(platform);
     }
+}
+
+bool cc_platform_drawable_size(CcPlatform *platform, int *width, int *height) {
+    if (!platform || !width || !height)
+        return false;
+    @autoreleasepool {
+        CcMetalState *state = (__bridge CcMetalState *)platform->metal_state;
+        if (!state || !state->view || !state->window.isVisible ||
+            state->window.isMiniaturized)
+            return false;
+        NSSize size = [state->view convertSizeToBacking:state->view.bounds.size];
+        if (!isfinite(size.width) || !isfinite(size.height) || size.width < 1 ||
+            size.height < 1 || size.width > INT_MAX || size.height > INT_MAX)
+            return false;
+        *width = (int)llround(size.width);
+        *height = (int)llround(size.height);
+        return true;
+    }
+}
+
+void cc_platform_set_native_pointer(CcPlatform *platform, bool enabled) {
+    if (platform)
+        platform->native_pointer = enabled;
+}
+
+void cc_platform_set_cursor_visible(CcPlatform *platform, bool visible) {
+    if (!platform)
+        return;
+    platform->cursor_visible = visible;
+    CcMetalState *state = (__bridge CcMetalState *)platform->metal_state;
+    [state->window invalidateCursorRectsForView:state->view];
+    if (visible)
+        [NSCursor.arrowCursor set];
 }
 
 bool cc_platform_poll(CcPlatform *platform, CcEvent *event) {

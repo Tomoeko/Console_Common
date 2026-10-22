@@ -94,6 +94,16 @@ bool cc_gles2_host_set_fullscreen(CcGles2Host *host, bool fullscreen) {
     return host && cc_windows_window_set_fullscreen(host->window, fullscreen);
 }
 
+void cc_gles2_host_set_native_pointer(CcGles2Host *host, bool enabled) {
+    if (host)
+        cc_windows_window_set_native_pointer(host->window, enabled);
+}
+
+void cc_gles2_host_set_cursor_visible(CcGles2Host *host, bool visible) {
+    if (host)
+        cc_windows_window_set_cursor_visible(host->window, visible);
+}
+
 void cc_gles2_host_surface_size(CcGles2Host *host, int *width, int *height) {
     cc_windows_window_size(host->window, width, height);
 }

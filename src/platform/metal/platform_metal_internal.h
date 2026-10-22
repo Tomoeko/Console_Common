@@ -99,6 +99,8 @@ struct CcPlatform {
     size_t event_read;
     size_t event_capacity;
     float fade_alpha;
+    bool native_pointer;
+    bool cursor_visible;
 };
 
 @interface CcMetalView : NSView

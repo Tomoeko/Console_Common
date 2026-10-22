@@ -542,6 +542,28 @@ void cc_platform_destroy(CcPlatform *platform) {
     free(platform);
 }
 
+bool cc_platform_drawable_size(CcPlatform *platform, int *width, int *height) {
+    if (!platform || !width || !height)
+        return false;
+    int native_width = 0, native_height = 0;
+    cc_gles2_host_surface_size(platform->host, &native_width, &native_height);
+    if (native_width <= 0 || native_height <= 0)
+        return false;
+    *width = native_width;
+    *height = native_height;
+    return true;
+}
+
+void cc_platform_set_native_pointer(CcPlatform *platform, bool enabled) {
+    if (platform)
+        cc_gles2_host_set_native_pointer(platform->host, enabled);
+}
+
+void cc_platform_set_cursor_visible(CcPlatform *platform, bool visible) {
+    if (platform)
+        cc_gles2_host_set_cursor_visible(platform->host, visible);
+}
+
 bool cc_platform_poll(CcPlatform *platform, CcEvent *event) {
     return platform != NULL && cc_gles2_host_poll(platform->host, event);
 }

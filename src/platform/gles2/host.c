@@ -25,6 +25,7 @@ struct CcGles2Host {
     EGLSurface egl_surface;
     EGLContext egl_context;
     bool swap_failure_reported;
+    bool native_pointer;
 };
 
 static void cc_report_egl_error(const char *operation) {
@@ -277,7 +278,29 @@ void cc_gles2_host_destroy(CcGles2Host *host) {
     free(host);
 }
 
+void cc_gles2_host_set_native_pointer(CcGles2Host *host, bool enabled) {
+    if (host)
+        host->native_pointer = enabled;
+}
+
+void cc_gles2_host_set_cursor_visible(CcGles2Host *host, bool visible) {
+    if (!host)
+        return;
+    if (visible)
+        XUndefineCursor(host->display, host->window);
+    else if (host->hidden_cursor != None)
+        XDefineCursor(host->display, host->window, host->hidden_cursor);
+    XFlush(host->display);
+}
+
 static void cc_pointer_event(CcGles2Host *host, CcEvent *event, int x, int y) {
+    if (host->native_pointer) {
+        event->x = x;
+        event->y = y;
+        event->outside_viewport =
+            x < 0 || y < 0 || x >= host->window_width || y >= host->window_height;
+        return;
+    }
     CcViewport viewport = cc_viewport_fit(host->window_width, host->window_height);
     if (viewport.width <= 0 || viewport.height <= 0) {
         event->type = CC_EVENT_POINTER_LEAVE;
@@ -404,6 +427,20 @@ bool cc_gles2_host_poll(CcGles2Host *host, CcEvent *event) {
             }
             case ButtonPress:
             case ButtonRelease:
+                if (native_event.xbutton.button >= Button4 &&
+                    native_event.xbutton.button <= 7) {
+                    if (native_event.type == ButtonRelease)
+                        break;
+                    event->type = CC_EVENT_POINTER_SCROLL;
+                    if (native_event.xbutton.button <= Button5)
+                        event->scroll_y =
+                            native_event.xbutton.button == Button4 ? 1 : -1;
+                    else
+                        event->scroll_x = native_event.xbutton.button == 6 ? -1 : 1;
+                    cc_pointer_event(host, event, native_event.xbutton.x,
+                                     native_event.xbutton.y);
+                    return true;
+                }
                 if (native_event.xbutton.button != Button1 &&
                     native_event.xbutton.button != Button2 &&
                     native_event.xbutton.button != Button3) {

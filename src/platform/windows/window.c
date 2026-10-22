@@ -26,6 +26,8 @@ struct CcWindowsWindow {
     bool opened;
     bool fullscreen;
     bool tracking_pointer;
+    bool native_pointer;
+    bool cursor_visible;
     bool quit;
     bool resized;
     bool lost_events;
@@ -93,8 +95,18 @@ static CcKey key_code(WPARAM key) {
 
 static CcEvent pointer_event(CcWindowsWindow *host, CcEventType type, LPARAM position) {
     CcEvent event = {.type = type};
-    CcViewport viewport = cc_viewport_fit(host->width, host->height);
     int x = GET_X_LPARAM(position), y = GET_Y_LPARAM(position);
+    EnterCriticalSection(&host->mutex);
+    int width = host->width, height = host->height;
+    bool native = host->native_pointer;
+    LeaveCriticalSection(&host->mutex);
+    if (native) {
+        event.x = x;
+        event.y = y;
+        event.outside_viewport = x < 0 || y < 0 || x >= width || y >= height;
+        return event;
+    }
+    CcViewport viewport = cc_viewport_fit(width, height);
     event.outside_viewport =
         !cc_viewport_map_pointer_unbounded(viewport, x, y, &event.x, &event.y);
     return event;
@@ -153,7 +165,10 @@ static LRESULT CALLBACK window_message(HWND window, UINT message, WPARAM first,
             return 1;
         case WM_SETCURSOR:
             if (LOWORD(second) == HTCLIENT) {
-                SetCursor(NULL);
+                EnterCriticalSection(&host->mutex);
+                bool visible = host->cursor_visible;
+                LeaveCriticalSection(&host->mutex);
+                SetCursor(visible ? LoadCursorW(NULL, IDC_ARROW) : NULL);
                 return TRUE;
             }
             return DefWindowProcW(window, message, first, second);
@@ -186,6 +201,21 @@ static LRESULT CALLBACK window_message(HWND window, UINT message, WPARAM first,
                              .caps_lock_on = (GetKeyState(VK_CAPITAL) & 1) != 0};
             if (key == CC_KEY_SHIFT || key == CC_KEY_CAPS_LOCK)
                 event.type = CC_EVENT_KEY_MODIFIERS;
+            queue_event(host, event);
+            return 0;
+        }
+        case WM_MOUSEWHEEL:
+        case WM_MOUSEHWHEEL: {
+            POINT point = {(short)LOWORD(second), (short)HIWORD(second)};
+            if (!ScreenToClient(window, &point))
+                return 0;
+            CcEvent event = pointer_event(host, CC_EVENT_POINTER_SCROLL,
+                                          MAKELPARAM(point.x, point.y));
+            float amount = (float)(short)HIWORD(first) / (float)WHEEL_DELTA;
+            if (message == WM_MOUSEWHEEL)
+                event.scroll_y = amount;
+            else
+                event.scroll_x = amount;
             queue_event(host, event);
             return 0;
         }
@@ -427,6 +457,24 @@ bool cc_windows_window_set_fullscreen(CcWindowsWindow *host, bool fullscreen) {
     return SendMessageTimeoutW(host->window, CC_WINDOW_FULLSCREEN, fullscreen, 0,
                                SMTO_ABORTIFHUNG | SMTO_BLOCK, 1000, &result) &&
            result;
+}
+
+void cc_windows_window_set_native_pointer(CcWindowsWindow *host, bool enabled) {
+    if (!host)
+        return;
+    EnterCriticalSection(&host->mutex);
+    host->native_pointer = enabled;
+    LeaveCriticalSection(&host->mutex);
+}
+
+void cc_windows_window_set_cursor_visible(CcWindowsWindow *host, bool visible) {
+    if (!host)
+        return;
+    EnterCriticalSection(&host->mutex);
+    host->cursor_visible = visible;
+    LeaveCriticalSection(&host->mutex);
+    PostMessageW(host->window, WM_SETCURSOR, (WPARAM)host->window,
+                 MAKELPARAM(HTCLIENT, WM_MOUSEMOVE));
 }
 
 void cc_windows_window_size(CcWindowsWindow *host, int *width, int *height) {

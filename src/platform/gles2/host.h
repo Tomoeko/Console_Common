@@ -18,6 +18,8 @@ bool cc_gles2_host_poll(CcGles2Host *host, CcEvent *event);
 bool cc_gles2_host_is_fullscreen(CcGles2Host *host);
 bool cc_gles2_host_set_fullscreen(CcGles2Host *host, bool fullscreen);
 void cc_gles2_host_surface_size(CcGles2Host *host, int *width, int *height);
+void cc_gles2_host_set_native_pointer(CcGles2Host *host, bool enabled);
+void cc_gles2_host_set_cursor_visible(CcGles2Host *host, bool visible);
 bool cc_gles2_host_present(CcGles2Host *host);
 
 #endif

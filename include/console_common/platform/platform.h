@@ -33,7 +33,8 @@ typedef enum CcEventType {
     CC_EVENT_KEY_DOWN,
     CC_EVENT_KEY_MODIFIERS,
     CC_EVENT_KEY_UP,
-    CC_EVENT_WINDOW_RESIZED
+    CC_EVENT_WINDOW_RESIZED,
+    CC_EVENT_POINTER_SCROLL
 } CcEventType;
 
 typedef enum CcKey {
@@ -74,6 +75,11 @@ typedef struct CcEvent {
     /* Native autorepeat is separate from a fresh physical press, including
      * after focus changes reset a consumer's held-key state. */
     bool key_repeat;
+    /* Positive Y scrolls up. Wheel deltas are notches; precise trackpad
+     * deltas remain native pixels so the application can choose its gesture. */
+    float scroll_x;
+    float scroll_y;
+    bool scroll_precise;
 } CcEvent;
 
 typedef struct CcColor {
@@ -150,6 +156,16 @@ typedef struct CcMaterialQuad {
  * resources. Exactly one backend is linked into an executable. */
 CcPlatform *cc_platform_create(const char *title, int window_width, int window_height);
 void cc_platform_destroy(CcPlatform *platform);
+/* Indexed consumers may use the entire native drawable rather than the legacy
+ * fitted picture. Query backing pixels on the render thread. A zero-area or
+ * unavailable surface returns false without writing outputs. Native pointer
+ * mode reports those same top-left backing-pixel coordinates, including outside
+ * drags; ordinary quad projection and existing fitted consumers stay unchanged. */
+bool cc_platform_drawable_size(CcPlatform *platform, int *width, int *height);
+void cc_platform_set_native_pointer(CcPlatform *platform, bool enabled);
+/* Independent of pointer coordinates. Existing consumers retain the default
+ * hidden cursor; applications with native mouse interaction can show it. */
+void cc_platform_set_cursor_visible(CcPlatform *platform, bool visible);
 bool cc_platform_poll(CcPlatform *platform, CcEvent *event);
 /* Window controls run on the host event thread. The setter accepts an
  * asynchronous request; the query reports the current native window state.

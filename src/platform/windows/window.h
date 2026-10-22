@@ -17,5 +17,7 @@ bool cc_windows_window_poll(CcWindowsWindow *window, CcEvent *event);
 bool cc_windows_window_is_fullscreen(CcWindowsWindow *window);
 bool cc_windows_window_set_fullscreen(CcWindowsWindow *window, bool fullscreen);
 void cc_windows_window_size(CcWindowsWindow *window, int *width, int *height);
+void cc_windows_window_set_native_pointer(CcWindowsWindow *window, bool enabled);
+void cc_windows_window_set_cursor_visible(CcWindowsWindow *window, bool visible);
 
 #endif
