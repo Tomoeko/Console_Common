@@ -13,6 +13,7 @@ int main(void) {
     cc_indexed_destroy(other);
     CcIndexedFrame unprepared = {.depth_attachment = true};
     PASS_REQUIRE(!cc_indexed_begin_passes(renderer, &unprepared, NULL, 0));
+    PASS_REQUIRE(!cc_indexed_begin_passes_wait(renderer, &unprepared, NULL, 0));
     PASS_REQUIRE(cc_indexed_prepare_drawable_depth(renderer, NULL, 0));
     CcFramebuffer shared_frame;
     PASS_REQUIRE(cc_platform_capture_begin(platform, &shared_frame));

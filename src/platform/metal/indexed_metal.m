@@ -665,7 +665,8 @@ static bool prepare_depth(CcIndexedRenderer *renderer, size_t slot, NSUInteger w
 }
 
 static bool begin_frame(CcIndexedRenderer *renderer, const CcIndexedFrame *frame,
-                        char *error, size_t error_capacity, bool wait_slot) {
+                        char *error, size_t error_capacity, bool wait_slot,
+                        bool allocate_depth) {
     if (!prepare_resources(renderer, error, error_capacity) ||
         !cc_indexed_frame_validate(frame, error, error_capacity))
         return false;
@@ -704,7 +705,7 @@ static bool begin_frame(CcIndexedRenderer *renderer, const CcIndexedFrame *frame
     if (!prepare_drawable(renderer, error, error_capacity) ||
         (frame->depth_attachment &&
          !prepare_depth(renderer, slot, frames.drawable.texture.width,
-                        frames.drawable.texture.height, wait_slot, error,
+                        frames.drawable.texture.height, allocate_depth, error,
                         error_capacity))) {
         frames.drawable = nil;
         return false;
@@ -1144,7 +1145,7 @@ bool cc_indexed_texture_update(CcIndexedRenderer *renderer, CcIndexedTexture *te
 bool cc_indexed_begin(CcIndexedRenderer *renderer, const CcIndexedFrame *frame,
                       char *error, size_t error_capacity) {
     @autoreleasepool {
-        if (!begin_frame(renderer, frame, error, error_capacity, true))
+        if (!begin_frame(renderer, frame, error, error_capacity, true, true))
             return false;
         CcIndexedPass pass = {
             .viewport = renderer->viewport,
@@ -1323,7 +1324,15 @@ bool cc_indexed_target_release(CcIndexedRenderer *renderer, CcIndexedTarget **ta
 bool cc_indexed_begin_passes(CcIndexedRenderer *renderer, const CcIndexedFrame *frame,
                              char *error, size_t error_capacity) {
     @autoreleasepool {
-        return begin_frame(renderer, frame, error, error_capacity, false);
+        return begin_frame(renderer, frame, error, error_capacity, false, false);
+    }
+}
+
+bool cc_indexed_begin_passes_wait(CcIndexedRenderer *renderer,
+                                  const CcIndexedFrame *frame, char *error,
+                                  size_t error_capacity) {
+    @autoreleasepool {
+        return begin_frame(renderer, frame, error, error_capacity, true, false);
     }
 }
 

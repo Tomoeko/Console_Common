@@ -347,6 +347,13 @@ bool cc_indexed_begin(CcIndexedRenderer *renderer, const CcIndexedFrame *frame,
  * of waiting. The legacy begin wrapper keeps its existing slot-reuse wait. */
 bool cc_indexed_begin_passes(CcIndexedRenderer *renderer, const CcIndexedFrame *frame,
                              char *error, size_t error_capacity);
+/* Same empty-frame entry with backpressure for continuous presentation. Metal
+ * waits only for the storage slot about to be reused, retaining other queued
+ * frames. Drawable depth must still be prepared outside frames. GLES2 uses its
+ * normal ordered submission path. End remains asynchronous. */
+bool cc_indexed_begin_passes_wait(CcIndexedRenderer *renderer,
+                                  const CcIndexedFrame *frame, char *error,
+                                  size_t error_capacity);
 bool cc_indexed_pass_begin(CcIndexedRenderer *renderer, const CcIndexedPass *pass,
                            char *error, size_t error_capacity);
 bool cc_indexed_draw(CcIndexedRenderer *renderer, const CcIndexedDraw *draw,

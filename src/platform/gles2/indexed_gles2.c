@@ -609,6 +609,12 @@ bool cc_indexed_begin(CcIndexedRenderer *renderer, const CcIndexedFrame *frame,
     return false;
 }
 
+bool cc_indexed_begin_passes_wait(CcIndexedRenderer *renderer,
+                                  const CcIndexedFrame *frame, char *error,
+                                  size_t error_capacity) {
+    return cc_indexed_begin_passes(renderer, frame, error, error_capacity);
+}
+
 static void apply_state(const CcIndexedState *state, bool depth_attachment) {
     static const GLenum factors[] = {GL_ZERO,          GL_ONE,
                                      GL_SRC_COLOR,     GL_ONE_MINUS_SRC_COLOR,
