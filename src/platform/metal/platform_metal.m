@@ -1,5 +1,7 @@
 #include "platform_metal_internal.h"
 
+#import <QuartzCore/CATransaction.h>
+
 #include <math.h>
 #include <limits.h>
 #include <stdio.h>
@@ -808,9 +810,17 @@ void cc_platform_end(CcPlatform *platform) {
             target ? (CcViewport){0, 0, (int)drawable_width, (int)drawable_height}
                    : cc_viewport_fit((int)drawable_width, (int)drawable_height);
         if (!target) {
-            state->layer.contentsScale = state->window.backingScaleFactor;
-            if (!CGSizeEqualToSize(state->layer.drawableSize, drawable_size)) {
+            CGFloat backing_scale = state->window.backingScaleFactor;
+            bool layer_changed =
+                state->layer &&
+                (state->layer.contentsScale != backing_scale ||
+                 !CGSizeEqualToSize(state->layer.drawableSize, drawable_size));
+            if (layer_changed) {
+                state->layer.contentsScale = backing_scale;
                 state->layer.drawableSize = drawable_size;
+                /* Publish the resized layer before nextDrawable can wait on
+                 * the compositor. The main thread also pumps AppKit events. */
+                [CATransaction flush];
             }
         }
 
