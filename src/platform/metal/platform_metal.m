@@ -747,12 +747,24 @@ static bool cc_encode_capture_presentation(CcMetalState *state,
     return true;
 }
 
+CGSize cc_metal_drawable_size(NSSize backing_size) {
+    if (!isfinite(backing_size.width) || !isfinite(backing_size.height) ||
+        backing_size.width < 1 || backing_size.height < 1)
+        return CGSizeZero;
+    /* Four sample shading at 5K costs sixteen times as much as at 720p.
+     * Keep the scene at most 1440p; Core Animation fills the display bounds. */
+    double scale =
+        fmin(1.0, fmin(2560.0 / backing_size.width, 1440.0 / backing_size.height));
+    return CGSizeMake(fmax(1.0, round(backing_size.width * scale)),
+                      fmax(1.0, round(backing_size.height * scale)));
+}
+
 void cc_platform_end(CcPlatform *platform) {
     CcMetalState *state = cc_metal_platform_state(platform);
     if (state && !state->render_target_handle)
         state->capture_ready = false;
     if (!state || (!state->render_target_handle && !state->capture_texture &&
-                   !state->window.isVisible)) {
+                   (!state->window.isVisible || state->fullscreen_transitioning))) {
         return;
     }
 
@@ -782,12 +794,13 @@ void cc_platform_end(CcPlatform *platform) {
         }
         bool capturing = !target && state->capture_texture != nil;
         NSSize size = [state->view convertSizeToBacking:state->view.bounds.size];
+        CGSize drawable_size = cc_metal_drawable_size(size);
         NSUInteger drawable_width = target      ? target.width
                                     : capturing ? (NSUInteger)state->capture_width
-                                                : (NSUInteger)llround(size.width);
+                                                : (NSUInteger)drawable_size.width;
         NSUInteger drawable_height = target      ? target.height
                                      : capturing ? (NSUInteger)state->capture_height
-                                                 : (NSUInteger)llround(size.height);
+                                                 : (NSUInteger)drawable_size.height;
         if (drawable_width == 0 || drawable_height == 0) {
             return;
         }
@@ -796,8 +809,6 @@ void cc_platform_end(CcPlatform *platform) {
                    : cc_viewport_fit((int)drawable_width, (int)drawable_height);
         if (!target) {
             state->layer.contentsScale = state->window.backingScaleFactor;
-            CGSize drawable_size =
-                CGSizeMake(fmax(1.0, round(size.width)), fmax(1.0, round(size.height)));
             if (!CGSizeEqualToSize(state->layer.drawableSize, drawable_size)) {
                 state->layer.drawableSize = drawable_size;
             }
@@ -828,7 +839,9 @@ void cc_platform_end(CcPlatform *platform) {
             return;
         }
 
-        id<CAMetalDrawable> drawable = target ? nil : [state->layer nextDrawable];
+        id<CAMetalDrawable> drawable = target || state->fullscreen_transitioning
+                                           ? nil
+                                           : [state->layer nextDrawable];
         if (!target && !capturing && !drawable) {
             return;
         }

@@ -8,6 +8,57 @@
 #include <stdlib.h>
 #include <string.h>
 
+@interface CcUnavailableDrawableLayer : CAMetalLayer
+@property(nonatomic) unsigned requests;
+@end
+
+@implementation CcUnavailableDrawableLayer
+- (id<CAMetalDrawable>)nextDrawable {
+    self.requests++;
+    return nil;
+}
+@end
+
+static void test_window_resolution(void) {
+    const NSSize backing_sizes[] = {
+        {640, 480},   {1920, 1080}, {2560, 1440}, {5120, 2880}, {3840, 2160},
+        {2880, 5120}, {5120, 2160}, {0, 480},     {640, NAN},   {INFINITY, 480},
+    };
+    const CGSize expected[] = {
+        {640, 480},  {1920, 1080}, {2560, 1440}, {2560, 1440}, {2560, 1440},
+        {810, 1440}, {2560, 1080}, {0, 0},       {0, 0},       {0, 0},
+    };
+    for (unsigned index = 0; index < sizeof(backing_sizes) / sizeof(backing_sizes[0]);
+         index++) {
+        assert(CGSizeEqualToSize(cc_metal_drawable_size(backing_sizes[index]),
+                                 expected[index]));
+    }
+}
+
+static void test_fullscreen_capture(CcPlatform *platform, CcMetalState *state) {
+    CcUnavailableDrawableLayer *layer = [CcUnavailableDrawableLayer layer];
+    state->layer = layer;
+    state->view = [[CcMetalView alloc] initWithFrame:NSMakeRect(0, 0, 80, 60)];
+    CcFramebuffer frame = {0};
+    assert(cc_platform_capture_begin(platform, &frame));
+    state->fullscreen_transitioning = true;
+    cc_platform_begin(platform, (CcColor){1, 0, 0, 1});
+    cc_platform_end(platform);
+    assert(layer.requests == 0);
+    assert(cc_platform_capture_frame(platform, &frame));
+    const uint8_t *pixel = frame.rgba + (size_t)(frame.height / 2) * frame.stride +
+                           (size_t)(frame.width / 2) * 4;
+    assert(pixel[0] == 255 && pixel[1] == 0 && pixel[2] == 0);
+    state->fullscreen_transitioning = false;
+    cc_platform_begin(platform, (CcColor){0, 1, 0, 1});
+    cc_platform_end(platform);
+    assert(layer.requests == 1);
+    assert(cc_platform_capture_frame(platform, &frame));
+    assert(pixel[0] == 0 && pixel[1] == 255 && pixel[2] == 0);
+    cc_platform_capture_end(platform);
+    state->layer = nil;
+}
+
 static unsigned pipeline_count(CcMetalState *state) {
     unsigned count = 0;
     for (unsigned kind = 0; kind < 2; ++kind) {
@@ -566,6 +617,7 @@ int main(void) {
         CcMetalState *state = [CcMetalState new];
         assert(cc_prepare_metal(state));
         CcPlatform platform = {.metal_state = (__bridge void *)state};
+        test_window_resolution();
         test_material_preparation(&platform, state);
         test_signed_quad(&platform, state);
         test_clip_rendering(&platform, state);
@@ -576,6 +628,7 @@ int main(void) {
         test_texture_sample_coverage(&platform, state);
         test_composed_alpha(&platform, state);
         test_translucent_clear(&platform, state);
+        test_fullscreen_capture(&platform, state);
         cc_wait_for_metal(state);
         cc_release_metal(state);
     }
