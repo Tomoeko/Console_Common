@@ -411,23 +411,52 @@ static void pass_extended_scene(CcIndexedRenderer *renderer, int drawable_width,
     PASS_REQUIRE(cc_indexed_target_release(renderer, &cleared, NULL, 0));
 }
 
-static void pass_extended_pixels(const CcFramebuffer *frame, int output_height) {
+static const uint8_t *pass_extended_color(int output_height, int composite_y,
+                                          bool lower_boundary) {
     static const uint8_t blue[] = {0, 0, 255, 255};
     static const uint8_t red[] = {255, 0, 0, 255};
     static const uint8_t green[] = {0, 255, 0, 255};
-    static const uint8_t clear[] = {51, 102, 153, 255};
+    int64_t position = ((int64_t)composite_y * 2 + 1) * (output_height + 16);
+    int64_t denominator = (int64_t)output_height * 2;
+    int scratch_y = (int)(position / denominator);
+    if (lower_boundary && position % denominator == 0 && scratch_y > 0)
+        scratch_y--;
+    if (scratch_y < output_height / 2 || scratch_y >= output_height)
+        return blue;
     int second_scissor = (output_height + 16) / 2 - 4;
+    return composite_y < second_scissor ? red : green;
+}
+
+static void pass_nearest_pixel(const CcFramebuffer *frame, int x, int y,
+                               const uint8_t expected[4], const uint8_t adjacent[4]) {
+    const uint8_t *pixel = frame->rgba + (size_t)y * frame->stride + (size_t)x * 4;
+    bool adjacent_matches = true;
+    for (size_t lane = 0; lane < 4; lane++) {
+        int difference = (int)pixel[lane] - adjacent[lane];
+        if (difference < -1 || difference > 1)
+            adjacent_matches = false;
+    }
+    if (!adjacent_matches)
+        pass_pixel(frame, x, y, expected);
+}
+
+static void pass_extended_pixels(const CcFramebuffer *frame, int output_height) {
+    static const uint8_t clear[] = {51, 102, 153, 255};
     for (int y = 1; y < frame->height; ++y) {
-        int composite_y =
-            (int)(((int64_t)y * 2 + 1) * output_height / ((int64_t)frame->height * 2));
-        int scratch_y = (int)(((int64_t)composite_y * 2 + 1) * (output_height + 16) /
-                              ((int64_t)output_height * 2));
+        int64_t position = ((int64_t)y * 2 + 1) * output_height;
+        int64_t denominator = (int64_t)frame->height * 2;
+        int composite_y = (int)(position / denominator);
+        int adjacent_y = composite_y;
+        /* At an exact nearest-sampling boundary, interpolation rounding can
+         * choose either neighboring texel. Keep all other samples strict and
+         * require a complete expected color, not independent channel choices. */
+        if (position % denominator == 0 && adjacent_y > 0)
+            adjacent_y--;
         const uint8_t *expected =
-            scratch_y < output_height / 2 || scratch_y >= output_height
-                ? blue
-                : (composite_y < second_scissor ? red : green);
-        pass_pixel(frame, frame->width / 8, y, expected);
-        pass_pixel(frame, frame->width * 3 / 8, y, expected);
+            pass_extended_color(output_height, composite_y, false);
+        const uint8_t *adjacent = pass_extended_color(output_height, adjacent_y, true);
+        pass_nearest_pixel(frame, frame->width / 8, y, expected, adjacent);
+        pass_nearest_pixel(frame, frame->width * 3 / 8, y, expected, adjacent);
         pass_pixel(frame, frame->width * 3 / 4, y, clear);
     }
 }
