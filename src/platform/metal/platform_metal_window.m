@@ -85,15 +85,17 @@ static void cc_enqueue_event(CcPlatform *platform, CcEvent event) {
     }
 
     NSSize backing = [self convertSizeToBacking:bounds.size];
-    CcViewport content =
-        cc_viewport_fit((int)llround(backing.width), (int)llround(backing.height));
+    CGSize drawable = self.platform->native_pointer
+                          ? CGSizeMake(backing.width, backing.height)
+                          : cc_metal_drawable_size(backing);
+    CcViewport content = cc_viewport_fit((int)drawable.width, (int)drawable.height);
     if (content.width <= 0 || content.height <= 0) {
         cc_enqueue_event(self.platform, (CcEvent){.type = CC_EVENT_POINTER_LEAVE});
         return;
     }
     int x = 0, y = 0;
-    int output_x = (int)floor(point.x * backing.width / bounds.size.width);
-    int output_y = (int)floor((bounds.size.height - point.y) * backing.height /
+    int output_x = (int)floor(point.x * drawable.width / bounds.size.width);
+    int output_y = (int)floor((bounds.size.height - point.y) * drawable.height /
                               bounds.size.height);
     bool outside =
         !cc_viewport_map_pointer_unbounded(content, output_x, output_y, &x, &y);

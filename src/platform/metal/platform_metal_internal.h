@@ -186,6 +186,9 @@ id<MTLRenderPipelineState>
 cc_metal_material_pipeline(CcMetalState *state, CcBatchKind kind, uint8_t blend_key);
 
 bool cc_prepare_metal(CcMetalState *state);
+/* Bound window rasterization cost independently of Retina display pixels.
+ * Offscreen targets and recording dimensions retain their requested sizes. */
+CGSize cc_metal_drawable_size(NSSize backing_size);
 /* Borrow the existing native device/window boundary for generic indexed draws. */
 CcMetalState *cc_metal_platform_state(CcPlatform *platform);
 void cc_wait_for_metal(CcMetalState *state);
